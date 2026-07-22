@@ -1,0 +1,29 @@
+manifestVersion: 1
+
+package:
+  name: robonix.primitive.syswonder.minecraft_bot
+  version: 0.1.0
+  description: Minecraft Forge client primitive providing camera, chassis, perception, and Minecraft capabilities.
+  tags: [primitive, minecraft, simulation, camera, chassis, perception]
+  maintainers:
+    - ZZJJWarth <jzeng25@stu.pku.edu.cn>
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+capabilities:
+  - name: robonix/primitive/camera/snapshot
+  - name: robonix/primitive/camera/depth_snapshot
+  - name: robonix/primitive/camera/rgb
+  - name: robonix/primitive/camera/depth
+  - name: robonix/primitive/camera/extrinsics
+  - name: robonix/primitive/camera/intrinsics
+  - name: robonix/primitive/camera/driver
+  - name: robonix/primitive/chassis/move
+  - name: robonix/primitive/chassis/odom
+  - name: robonix/primitive/chassis/driver
+  - name: robonix/primitive/perception/objects
+  - name: robonix/primitive/minecraft/inventory
+  - name: robonix/primitive/minecraft/break_block
+  - name: robonix/primitive/minecraft/deposit_item

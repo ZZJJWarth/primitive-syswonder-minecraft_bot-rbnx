@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/.robonix-source/target
+
+jobs:
+  validate-and-build:
+    name: Validate, test, and build
+    runs-on: ubuntu-24.04
+    env:
+      ROBONIX_HOME: /tmp/robonix-home
+    steps:
+      - name: Check out package
+        uses: actions/checkout@v4
+
+      - name: Check out supported Robonix baseline
+        uses: actions/checkout@v4
+        with:
+          repository: syswonder/robonix
+          ref: 74b4ca0f7c0db3c237730321753501e12646c626
+          path: .robonix-source
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Temurin JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up ROS 2 Jazzy
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Robonix Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .robonix-source
+
+      - name: Install Robonix CLI and code generator
+        run: |
+          cargo install --locked --path .robonix-source/tools/codegen --bin robonix-codegen
+          cargo install --locked --path .robonix-source/tools/rbnx --bin rbnx
+          rbnx setup "$GITHUB_WORKSPACE/.robonix-source"
+
+      - name: Validate package manifest
+        run: rbnx validate .
+
+      - name: Run Python tests and Forge build
+        run: JAVA17_HOME="$JAVA_HOME" rbnx build -p .

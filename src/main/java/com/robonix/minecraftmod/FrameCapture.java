@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: MulanPSL-2.0
+package com.robonix.minecraftmod;
+
+import com.mojang.blaze3d.platform.NativeImage;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.Iterator;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.imageio.IIOImage;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.Screenshot;
+import net.minecraftforge.client.event.RenderGuiEvent;
+import net.minecraftforge.client.event.ScreenEvent;
+
+/** Captures the final client framebuffer and retains the latest JPEG frame. */
+public final class FrameCapture implements AutoCloseable {
+    private final AtomicReference<Frame> latest = new AtomicReference<>();
+    private final AtomicBoolean encoding = new AtomicBoolean(false);
+    private final ExecutorService encoder = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "robonix-frame-encoder");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final long intervalNanos = Math.min(
+            envLong("RBNX_MINECRAFT_CAPTURE_INTERVAL_MS", 200L), 60_000L) * 1_000_000L;
+    private final int outputWidth = Math.min(envInt("RBNX_MINECRAFT_CAPTURE_WIDTH", 960), 3840);
+    private final int outputHeight = Math.min(envInt("RBNX_MINECRAFT_CAPTURE_HEIGHT", 540), 2160);
+    private final float jpegQuality = envFloat("RBNX_MINECRAFT_JPEG_QUALITY", 0.8F);
+    private long lastCaptureNanos;
+
+    /** Reads a frame on the render thread at a bounded rate and encodes it asynchronously. */
+    public void onRenderGui(RenderGuiEvent.Post event) {
+        if (Minecraft.getInstance().screen == null) {
+            capture();
+        }
+    }
+
+    /** Captures after an open inventory, menu, or other screen has rendered. */
+    public void onRenderScreen(ScreenEvent.Render.Post event) {
+        capture();
+    }
+
+    /** Takes one owned native image when rate and encoder capacity permit. */
+    private void capture() {
+        long now = System.nanoTime();
+        if (now - lastCaptureNanos < intervalNanos || !encoding.compareAndSet(false, true)) {
+            return;
+        }
+        lastCaptureNanos = now;
+        NativeImage image = null;
+        try {
+            image = Screenshot.takeScreenshot(Minecraft.getInstance().getMainRenderTarget());
+            NativeImage ownedImage = image;
+            encoder.execute(() -> encode(ownedImage));
+        } catch (RuntimeException exception) {
+            if (image != null) {
+                image.close();
+            }
+            encoding.set(false);
+            RobonixMinecraftMod.LOGGER.error("Failed to capture Minecraft frame", exception);
+        }
+    }
+
+    /** Returns a recent encoded frame, or null when capture has stopped or not completed. */
+    public Frame latest() {
+        Frame frame = latest.get();
+        long maxAgeMillis = Math.max(5000L, TimeUnit.NANOSECONDS.toMillis(intervalNanos) * 3L);
+        if (frame == null || System.currentTimeMillis() - frame.timestampMs() > maxAgeMillis) {
+            return null;
+        }
+        return frame;
+    }
+
+    /** Converts one owned native image to a scaled JPEG and releases native memory. */
+    private void encode(NativeImage image) {
+        try (image) {
+            BufferedImage buffered = scale(image, outputWidth, outputHeight);
+            byte[] data = writeJpeg(buffered, jpegQuality);
+            latest.set(new Frame(data, buffered.getWidth(), buffered.getHeight(), System.currentTimeMillis()));
+        } catch (Exception exception) {
+            RobonixMinecraftMod.LOGGER.error("Failed to encode Minecraft frame", exception);
+        } finally {
+            encoding.set(false);
+        }
+    }
+
+    /** Scales the native ABGR pixels to an RGB image with nearest-neighbor sampling. */
+    private static BufferedImage scale(NativeImage source, int requestedWidth, int requestedHeight) {
+        double scale = Math.min(1.0, Math.min(
+                (double) requestedWidth / source.getWidth(),
+                (double) requestedHeight / source.getHeight()));
+        int width = Math.max(1, (int) Math.round(source.getWidth() * scale));
+        int height = Math.max(1, (int) Math.round(source.getHeight() * scale));
+        BufferedImage target = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < height; y++) {
+            int sourceY = y * source.getHeight() / height;
+            for (int x = 0; x < width; x++) {
+                int sourceX = x * source.getWidth() / width;
+                int abgr = source.getPixelRGBA(sourceX, sourceY);
+                int rgb = ((abgr & 0xFF) << 16) | (abgr & 0xFF00) | ((abgr >>> 16) & 0xFF);
+                target.setRGB(x, y, rgb);
+            }
+        }
+        return target;
+    }
+
+    /** Encodes an RGB image using an explicit JPEG compression quality. */
+    private static byte[] writeJpeg(BufferedImage image, float quality) throws IOException {
+        Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpeg");
+        if (!writers.hasNext()) {
+            throw new IOException("no JPEG writer available");
+        }
+        ImageWriter writer = writers.next();
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream();
+             ImageOutputStream imageOutput = ImageIO.createImageOutputStream(output)) {
+            ImageWriteParam params = writer.getDefaultWriteParam();
+            params.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+            params.setCompressionQuality(Math.max(0.1F, Math.min(1.0F, quality)));
+            writer.setOutput(imageOutput);
+            writer.write(null, new IIOImage(image, null, null), params);
+            return output.toByteArray();
+        } finally {
+            writer.dispose();
+        }
+    }
+
+    /** Reads a positive integer environment setting with a safe default. */
+    private static int envInt(String name, int fallback) {
+        try {
+            return Math.max(1, Integer.parseInt(System.getenv().getOrDefault(name, String.valueOf(fallback))));
+        } catch (NumberFormatException exception) {
+            return fallback;
+        }
+    }
+
+    /** Reads a positive long environment setting with a safe default. */
+    private static long envLong(String name, long fallback) {
+        try {
+            return Math.max(1L, Long.parseLong(System.getenv().getOrDefault(name, String.valueOf(fallback))));
+        } catch (NumberFormatException exception) {
+            return fallback;
+        }
+    }
+
+    /** Reads a floating-point environment setting with a safe default. */
+    private static float envFloat(String name, float fallback) {
+        try {
+            float value = Float.parseFloat(System.getenv().getOrDefault(name, String.valueOf(fallback)));
+            return Float.isFinite(value) ? value : fallback;
+        } catch (NumberFormatException exception) {
+            return fallback;
+        }
+    }
+
+    /** Stops the background encoder when the client exits. */
+    @Override
+    public void close() {
+        encoder.shutdownNow();
+    }
+
+    /** Immutable encoded camera frame shared with command connections. */
+    public record Frame(byte[] data, int width, int height, long timestampMs) {}
+}
