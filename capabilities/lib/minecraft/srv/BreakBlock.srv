@@ -1,0 +1,7 @@
+string expected_block
+bool collect
+---
+bool block_broken
+string original_block
+string collected_item
+uint32 collected_count

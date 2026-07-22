@@ -1,0 +1,9 @@
+# Break the crosshair-targeted dirt or crafting table and optionally verify synchronized pickup.
+[contract]
+id      = "robonix/primitive/minecraft/break_block"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/BreakBlock.srv"
+
+[mode]
+type = "rpc"

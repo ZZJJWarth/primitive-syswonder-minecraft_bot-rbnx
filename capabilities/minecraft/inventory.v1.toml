@@ -1,0 +1,9 @@
+# Inspect the player's main inventory, hotbar, and offhand without mutation.
+[contract]
+id      = "robonix/primitive/minecraft/inventory"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/Inventory.srv"
+
+[mode]
+type = "rpc"

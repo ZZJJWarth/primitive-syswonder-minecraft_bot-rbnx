@@ -1,0 +1,15 @@
+# Complete exact-object snapshot supplied by a structured perception source.
+# The String data is JSON:
+# {"frame_id":str,"timestamp":unix,"objects":[
+#   {"id":str,"label":str,"x":float,"y":float,"z":float,
+#    "yaw":float,"last_seen_unix":float}
+# ]}
+# An object absent from a newer snapshot is no longer present at the source.
+[contract]
+id      = "robonix/primitive/perception/objects"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/std_msgs/msg/String.msg"
+
+[mode]
+type = "topic_out"

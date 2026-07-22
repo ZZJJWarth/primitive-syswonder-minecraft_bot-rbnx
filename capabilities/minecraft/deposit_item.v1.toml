@@ -1,0 +1,9 @@
+# Deposit exactly one supported item into a reachable chest and verify synchronization.
+[contract]
+id      = "robonix/primitive/minecraft/deposit_item"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/DepositItem.srv"
+
+[mode]
+type = "rpc"
