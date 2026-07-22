@@ -31,7 +31,7 @@ echo "[minecraft-mod/build] rbnx codegen ${FLAGS[*]}"
 rbnx codegen -p "$PKG" "${FLAGS[@]}"
 
 echo "[minecraft-mod/build] provider smoke tests"
-PYTHONPATH="$(rbnx path robonix-api):$PKG" \
+PYTHONPATH="$(rbnx path robonix-api):$PKG:$PKG/rbnx-build/codegen/proto_gen:$PKG/rbnx-build/codegen/robonix_mcp_types:${PYTHONPATH:-}" \
   "$VENV/bin/python3" -m unittest discover -s "$PKG/tests" -v
 
 echo "[minecraft-mod/build] Forge jar"
