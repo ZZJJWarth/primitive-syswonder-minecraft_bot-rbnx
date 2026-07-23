@@ -13,6 +13,7 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ClickType;
@@ -30,9 +31,13 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.event.TickEvent;
 
-/** Executes the confirmed inventory and item-action primitive capabilities. */
+/** Executes the confirmed inventory and Minecraft action primitive capabilities. */
 public final class MinecraftActions implements AutoCloseable {
     private static final long ACTION_TIMEOUT_NANOS = 25_000_000_000L;
+    private static final long AIM_TIMEOUT_NANOS = 5_000_000_000L;
+    private static final double MAX_AIM_YAW_DEGREES_PER_SECOND = 120.0;
+    private static final double MAX_AIM_PITCH_DEGREES_PER_SECOND = 90.0;
+    private static final int REQUIRED_AIM_HIT_TICKS = 3;
     private static final ResourceLocation DIRT = ResourceLocation.fromNamespaceAndPath("minecraft", "dirt");
     private static final ResourceLocation CRAFTING_TABLE =
             ResourceLocation.fromNamespaceAndPath("minecraft", "crafting_table");
@@ -48,6 +53,44 @@ public final class MinecraftActions implements AutoCloseable {
     /** Reads all stable main-inventory slots plus offhand on the client thread. */
     public CompletableFuture<JsonObject> inventory() {
         return onClientThread(() -> inventoryResult(requirePlayer(Minecraft.getInstance())));
+    }
+
+    /** Gradually turns the player until the live crosshair stably hits one reachable block. */
+    public CompletableFuture<JsonObject> aimAtBlock(
+            int x,
+            int y,
+            int z,
+            String expectedBlock
+    ) {
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        Minecraft.getInstance().execute(() -> {
+            try {
+                requireNoActiveAction();
+                Minecraft minecraft = Minecraft.getInstance();
+                LocalPlayer player = requirePlayer(minecraft);
+                BlockPos target = new BlockPos(x, y, z);
+                ResourceLocation expected = ResourceLocation.tryParse(expectedBlock);
+                if (expected == null) {
+                    throw new IllegalArgumentException("expected_block is not a valid registry name");
+                }
+                validateExpectedTarget(minecraft, player, target, expectedBlock);
+                if (minecraft.screen != null) {
+                    throw new IllegalStateException("close the current screen before aiming at a block");
+                }
+                control.stopForAction();
+                long now = System.nanoTime();
+                activeAction = new ActiveAim(
+                        player,
+                        target,
+                        expectedBlock,
+                        now,
+                        now + AIM_TIMEOUT_NANOS,
+                        result);
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
     }
 
     /** Validates and begins normal survival-mode destruction of one supported block. */
@@ -180,10 +223,65 @@ public final class MinecraftActions implements AutoCloseable {
                 tickBreak(minecraft, player, breaking);
             } else if (action instanceof ActiveDeposit deposit) {
                 tickDeposit(minecraft, player, deposit);
+            } else if (action instanceof ActiveAim aiming) {
+                tickAim(minecraft, player, aiming);
             }
         } catch (Exception exception) {
             finishActive(exception);
         }
+    }
+
+    /** Applies bounded view corrections and succeeds only after stable live crosshair hits. */
+    private void tickAim(Minecraft minecraft, LocalPlayer player, ActiveAim action) {
+        if (minecraft.screen != null) {
+            throw new IllegalStateException("a screen opened before aiming completed");
+        }
+        validateExpectedTarget(minecraft, player, action.target(), action.expectedBlock());
+        HitResult currentHit = minecraft.hitResult;
+        if (currentHit instanceof BlockHitResult blockHit
+                && blockHit.getType() == HitResult.Type.BLOCK
+                && blockHit.getBlockPos().equals(action.target())) {
+            if (action.incrementStableHitTicks() >= REQUIRED_AIM_HIT_TICKS) {
+                JsonObject response = new JsonObject();
+                response.addProperty("aimed", true);
+                response.addProperty("actual_block", action.expectedBlock());
+                response.addProperty("hit_face", blockHit.getDirection().getName());
+                response.addProperty("final_yaw_deg", player.getYRot());
+                response.addProperty("final_pitch_deg", player.getXRot());
+                finishActive(response);
+            }
+            return;
+        }
+        action.resetStableHitTicks();
+        turnTowardBlock(player, action, System.nanoTime());
+    }
+
+    /** Turns toward the target centre without exceeding the configured per-second view rates. */
+    private static void turnTowardBlock(LocalPlayer player, ActiveAim action, long nowNanos) {
+        Vec3 eye = player.getEyePosition();
+        Vec3 target = Vec3.atCenterOf(action.target());
+        double dx = target.x - eye.x;
+        double dy = target.y - eye.y;
+        double dz = target.z - eye.z;
+        double horizontal = Math.hypot(dx, dz);
+        float targetYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float targetPitch = (float) -Math.toDegrees(Math.atan2(dy, horizontal));
+        double elapsedSeconds = Math.min(0.1, Math.max(0.001,
+                (nowNanos - action.lastStepNanos()) / 1_000_000_000.0));
+        float yawError = Mth.wrapDegrees(targetYaw - player.getYRot());
+        float pitchError = targetPitch - player.getXRot();
+        float yawStep = boundedStep(yawError, MAX_AIM_YAW_DEGREES_PER_SECOND * elapsedSeconds);
+        float pitchStep = boundedStep(pitchError, MAX_AIM_PITCH_DEGREES_PER_SECOND * elapsedSeconds);
+        player.setYRot(player.getYRot() + yawStep);
+        player.setYHeadRot(player.getYRot());
+        player.setXRot(Mth.clamp(player.getXRot() + pitchStep, -90.0F, 90.0F));
+        action.setLastStepNanos(nowNanos);
+    }
+
+    /** Clamps one signed angular correction to its positive magnitude limit. */
+    private static float boundedStep(float error, double maximumMagnitude) {
+        float limit = (float) maximumMagnitude;
+        return Mth.clamp(error, -limit, limit);
     }
 
     /** Keeps native attack input held until the world changes, then optionally awaits pickup. */
@@ -425,6 +523,22 @@ public final class MinecraftActions implements AutoCloseable {
         return hit;
     }
 
+    /** Requires a reachable visible target to retain the exact requested block type. */
+    private static BlockHitResult validateExpectedTarget(
+            Minecraft minecraft,
+            LocalPlayer player,
+            BlockPos target,
+            String expectedBlock
+    ) {
+        BlockHitResult hit = validateTarget(minecraft, player, target);
+        String actualBlock = blockName(minecraft.level.getBlockState(target));
+        if (!actualBlock.equals(expectedBlock)) {
+            throw new IllegalStateException(
+                    "target block is " + actualBlock + ", not " + expectedBlock);
+        }
+        return hit;
+    }
+
     /** Returns the currently crosshair-targeted block after a fresh reach check. */
     private static BlockHitResult crosshairTarget(Minecraft minecraft, LocalPlayer player) {
         HitResult currentHit = minecraft.hitResult;
@@ -519,10 +633,10 @@ public final class MinecraftActions implements AutoCloseable {
         gameMode.handleInventoryMouseClick(menu.containerId, slot, button, ClickType.PICKUP, player);
     }
 
-    /** Rejects overlapping break and deposit operations. */
+    /** Rejects overlapping aim, break, and deposit operations. */
     private void requireNoActiveAction() {
         if (activeAction != null) {
-            throw new IllegalStateException("another item action is already active");
+            throw new IllegalStateException("another Minecraft action is already active");
         }
     }
 
@@ -581,12 +695,49 @@ public final class MinecraftActions implements AutoCloseable {
         JsonObject run();
     }
 
-    private sealed interface ActiveAction permits ActiveBreak, ActiveDeposit {
+    private sealed interface ActiveAction permits ActiveAim, ActiveBreak, ActiveDeposit {
         LocalPlayer player();
 
         long deadlineNanos();
 
         CompletableFuture<JsonObject> result();
+    }
+
+    /** Retains one bounded automatic-aim command and its live-hit stability count. */
+    private static final class ActiveAim implements ActiveAction {
+        private final LocalPlayer player;
+        private final BlockPos target;
+        private final String expectedBlock;
+        private final long deadlineNanos;
+        private final CompletableFuture<JsonObject> result;
+        private long lastStepNanos;
+        private int stableHitTicks;
+
+        ActiveAim(
+                LocalPlayer player,
+                BlockPos target,
+                String expectedBlock,
+                long lastStepNanos,
+                long deadlineNanos,
+                CompletableFuture<JsonObject> result
+        ) {
+            this.player = player;
+            this.target = target;
+            this.expectedBlock = expectedBlock;
+            this.lastStepNanos = lastStepNanos;
+            this.deadlineNanos = deadlineNanos;
+            this.result = result;
+        }
+
+        public LocalPlayer player() { return player; }
+        public BlockPos target() { return target; }
+        public String expectedBlock() { return expectedBlock; }
+        public long deadlineNanos() { return deadlineNanos; }
+        public CompletableFuture<JsonObject> result() { return result; }
+        long lastStepNanos() { return lastStepNanos; }
+        void setLastStepNanos(long value) { lastStepNanos = value; }
+        int incrementStableHitTicks() { return ++stableHitTicks; }
+        void resetStableHitTicks() { stableHitTicks = 0; }
     }
 
     /** Retains break input state while advancing from destruction to pickup. */

@@ -1,0 +1,13 @@
+# Gradually aim the live crosshair at one visible reachable block without interacting with it.
+[contract]
+id      = "robonix/primitive/minecraft/aim_at_block"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/AimAtBlock.srv"
+description = "Gradually aim the live crosshair at a visible reachable block using integer Minecraft world coordinates without interacting with it."
+
+[mode]
+type = "rpc"
+
+[semantics]
+user_invocable = true

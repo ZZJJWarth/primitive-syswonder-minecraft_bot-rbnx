@@ -723,6 +723,63 @@ def inventory_mcp(
     return minecraft_mcp.Inventory_Response(selected_slot=selected, slots=slots)
 
 
+@minecraft_actions.mcp("robonix/primitive/minecraft/get_state")
+def get_state_mcp(
+    req: minecraft_mcp.GetState_Request,
+) -> minecraft_mcp.GetState_Response:
+    """Return a fresh timestamped Minecraft-world player state snapshot."""
+    _ = req
+    observation = client.request({"cmd": "observe"})
+    captured_at = str(observation.get("timestamp") or "")
+    observation_timestamp(observation)
+    coordinate_frame = str(observation.get("coordinateFrame") or "")
+    dimension = registry_name(observation.get("dimension"), "dimension")
+    game_mode = str(observation.get("gameMode") or "")
+    position = observation.get("position") or {}
+    values = {
+        name: float(value)
+        for name, value in (
+            ("x", position.get("x")),
+            ("y", position.get("y")),
+            ("z", position.get("z")),
+            ("yaw_rad", observation.get("yaw")),
+            ("pitch_rad", observation.get("pitch")),
+            ("health", observation.get("health")),
+        )
+    }
+    if coordinate_frame != "minecraft_world":
+        raise RuntimeError("Minecraft Mod returned an unexpected state coordinate frame")
+    if not all(math.isfinite(value) for value in values.values()):
+        raise RuntimeError("Minecraft Mod returned non-finite player state")
+    if not isinstance(observation.get("onGround"), bool):
+        raise RuntimeError("Minecraft Mod returned invalid on-ground state")
+    food = exact_int(observation.get("food"), "food", 0, 4_294_967_295)
+    if not game_mode:
+        raise RuntimeError("Minecraft Mod returned an empty game mode")
+    navigation_x, navigation_y, _, navigation_yaw, _ = observation_pose(observation)
+    return minecraft_mcp.GetState_Response(
+        captured_at=captured_at,
+        coordinate_frame=coordinate_frame,
+        dimension=dimension,
+        x=values["x"],
+        y=values["y"],
+        z=values["z"],
+        block_x=math.floor(values["x"]),
+        block_y=math.floor(values["y"]),
+        block_z=math.floor(values["z"]),
+        yaw_rad=values["yaw_rad"],
+        pitch_rad=values["pitch_rad"],
+        navigation_frame=odom_frame_id,
+        navigation_x=navigation_x,
+        navigation_y=navigation_y,
+        navigation_yaw_rad=navigation_yaw,
+        on_ground=observation["onGround"],
+        health=values["health"],
+        food=food,
+        game_mode=game_mode,
+    )
+
+
 def validated_coordinates(req: Any) -> tuple[int, int, int]:
     """Validate signed int32 block coordinates from a generated MCP request."""
     return tuple(
@@ -765,6 +822,49 @@ def break_block_mcp(
         original_block=original,
         collected_item=collected_item,
         collected_count=collected_count,
+    )
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/aim_at_block")
+def aim_at_block_mcp(
+    req: minecraft_mcp.AimAtBlock_Request,
+) -> minecraft_mcp.AimAtBlock_Response:
+    """Gradually aim the live crosshair at one visible reachable block.
+
+    Use integer Minecraft world coordinates, such as the coordinates encoded
+    after `@` in an exact semantic object's id; do not pass its transformed ROS
+    centroid. `expected_block` is the exact namespaced registry name. This
+    capability only turns the view and never attacks or uses the target. Wait
+    until navigation is terminal before calling it.
+    """
+    x, y, z = validated_coordinates(req)
+    expected = registry_name(req.expected_block, "expected_block")
+    result = action_request({
+        "cmd": "aim_at_block",
+        "x": x,
+        "y": y,
+        "z": z,
+        "expected_block": expected,
+    })
+    aimed = result.get("aimed")
+    actual = registry_name(result.get("actual_block"), "actual_block")
+    hit_face = result.get("hit_face")
+    if aimed is not True or actual != expected:
+        raise RuntimeError("Minecraft Mod did not verify the requested crosshair target")
+    if hit_face not in {"down", "up", "north", "south", "west", "east"}:
+        raise RuntimeError("Minecraft Mod returned an invalid block hit face")
+    final_yaw = float(result.get("final_yaw_deg"))
+    final_pitch = float(result.get("final_pitch_deg"))
+    if not math.isfinite(final_yaw) or not math.isfinite(final_pitch):
+        raise RuntimeError("Minecraft Mod returned non-finite final view angles")
+    if not -90.0 <= final_pitch <= 90.0:
+        raise RuntimeError("Minecraft Mod returned an invalid final pitch")
+    return minecraft_mcp.AimAtBlock_Response(
+        aimed=True,
+        actual_block=actual,
+        hit_face=hit_face,
+        final_yaw_deg=final_yaw,
+        final_pitch_deg=final_pitch,
     )
 
 

@@ -159,6 +159,11 @@ public final class LocalCommandServer implements AutoCloseable {
                     request.has("pitch_degrees") ? request.get("pitch_degrees").getAsDouble() : 0.0);
             case "stop" -> control.stop();
             case "inventory" -> actions.inventory();
+            case "aim_at_block" -> actions.aimAtBlock(
+                    requiredInt(request, "x"),
+                    requiredInt(request, "y"),
+                    requiredInt(request, "z"),
+                    requiredString(request, "expected_block"));
             case "break_block" -> actions.breakBlock(
                     requiredString(request, "expected_block"),
                     requiredBoolean(request, "collect"));

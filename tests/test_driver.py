@@ -73,6 +73,52 @@ class MinecraftModClientTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inconsistent"):
                 driver.inventory_mcp(driver.minecraft_mcp.Inventory_Request())
 
+    def test_get_state_returns_fresh_minecraft_world_pose(self) -> None:
+        """Validate and expose a compact dynamic snapshot without mutation."""
+        observation = {
+            "timestamp": "2026-07-23T04:31:02.315Z",
+            "coordinateFrame": "minecraft_world",
+            "dimension": "minecraft:overworld",
+            "position": {"x": 12.35, "y": 64.0, "z": -7.82},
+            "yaw": 1.25,
+            "pitch": -0.2,
+            "onGround": True,
+            "health": 20.0,
+            "food": 18,
+            "gameMode": "survival",
+        }
+        with patch.object(driver.client, "request", return_value=observation) as request:
+            response = driver.get_state_mcp(driver.minecraft_mcp.GetState_Request())
+        request.assert_called_once_with({"cmd": "observe"})
+        self.assertEqual((response.block_x, response.block_y, response.block_z), (12, 64, -8))
+        self.assertEqual(response.coordinate_frame, "minecraft_world")
+        self.assertAlmostEqual(response.yaw_rad, 1.25)
+        self.assertEqual(response.navigation_frame, driver.odom_frame_id)
+        self.assertAlmostEqual(response.navigation_x, 12.35)
+        self.assertAlmostEqual(response.navigation_y, 7.82)
+        self.assertAlmostEqual(
+            response.navigation_yaw_rad,
+            math.atan2(math.sin(1.25 + math.pi / 2.0), math.cos(1.25 + math.pi / 2.0)),
+        )
+
+    def test_get_state_rejects_nonfinite_pose(self) -> None:
+        """Never expose an unusable live-state block to Pilot."""
+        observation = {
+            "timestamp": "2026-07-23T04:31:02.315Z",
+            "coordinateFrame": "minecraft_world",
+            "dimension": "minecraft:overworld",
+            "position": {"x": float("nan"), "y": 64.0, "z": -7.82},
+            "yaw": 1.25,
+            "pitch": -0.2,
+            "onGround": True,
+            "health": 20.0,
+            "food": 18,
+            "gameMode": "survival",
+        }
+        with patch.object(driver.client, "request", return_value=observation):
+            with self.assertRaisesRegex(RuntimeError, "non-finite"):
+                driver.get_state_mcp(driver.minecraft_mcp.GetState_Request())
+
     def test_break_block_targets_crosshair_and_verifies_pickup(self) -> None:
         """Request the crosshair target and require verified dirt pickup."""
         request_message = driver.minecraft_mcp.BreakBlock_Request(
@@ -92,6 +138,54 @@ class MinecraftModClientTest(unittest.TestCase):
             "expected_block": "minecraft:dirt",
             "collect": True,
         })
+
+    def test_aim_at_block_forwards_coordinates_and_verifies_live_hit(self) -> None:
+        """Expose only a Mod-confirmed stable crosshair hit to the caller."""
+        message = driver.minecraft_mcp.AimAtBlock_Request(
+            x=2, y=64, z=-3, expected_block="minecraft:chest",
+        )
+        result = {
+            "aimed": True,
+            "actual_block": "minecraft:chest",
+            "hit_face": "north",
+            "final_yaw_deg": 35.5,
+            "final_pitch_deg": -12.25,
+        }
+        with patch.object(driver.client, "request", return_value=result) as request:
+            response = driver.aim_at_block_mcp(message)
+        self.assertTrue(response.aimed)
+        self.assertEqual(response.hit_face, "north")
+        self.assertEqual(request.call_args.args[0], {
+            "cmd": "aim_at_block",
+            "x": 2,
+            "y": 64,
+            "z": -3,
+            "expected_block": "minecraft:chest",
+        })
+
+    def test_aim_at_block_rejects_unverified_mod_result(self) -> None:
+        """Reject mismatched blocks, invalid faces, and impossible final pitch."""
+        message = driver.minecraft_mcp.AimAtBlock_Request(
+            x=2, y=64, z=-3, expected_block="minecraft:chest",
+        )
+        valid = {
+            "aimed": True,
+            "actual_block": "minecraft:chest",
+            "hit_face": "north",
+            "final_yaw_deg": 35.5,
+            "final_pitch_deg": -12.25,
+        }
+        cases = (
+            ({**valid, "actual_block": "minecraft:dirt"}, "crosshair target"),
+            ({**valid, "hit_face": "inside"}, "hit face"),
+            ({**valid, "final_pitch_deg": 91.0}, "final pitch"),
+        )
+        for result, error in cases:
+            with self.subTest(error=error), patch.object(
+                driver.client, "request", return_value=result,
+            ):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    driver.aim_at_block_mcp(message)
 
     def test_break_block_rejects_unsupported_block_before_request(self) -> None:
         """Reject blocks outside the confirmed dirt and crafting-table set."""

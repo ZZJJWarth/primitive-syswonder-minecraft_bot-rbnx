@@ -1,0 +1,13 @@
+# Return a fresh compact snapshot of the Minecraft player's dynamic state.
+[contract]
+id      = "robonix/primitive/minecraft/get_state"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/GetState.srv"
+description = "Return the current player state in both native minecraft_world x/y/z and the converted ROS navigation frame. Use navigation_frame/x/y/yaw for generic navigation; use navigation/navigate_world for a native Minecraft coordinate. Never put Minecraft z into a generic PoseStamped position.z and never replace rejected navigation with a long-distance chassis/move."
+
+[mode]
+type = "rpc"
+
+[semantics]
+user_invocable = true

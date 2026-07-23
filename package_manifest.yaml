@@ -27,6 +27,10 @@ capabilities:
     path: capabilities/perception/objects.v1.toml
   - name: robonix/primitive/minecraft/inventory
     path: capabilities/minecraft/inventory.v1.toml
+  - name: robonix/primitive/minecraft/get_state
+    path: capabilities/minecraft/get_state.v1.toml
+  - name: robonix/primitive/minecraft/aim_at_block
+    path: capabilities/minecraft/aim_at_block.v1.toml
   - name: robonix/primitive/minecraft/break_block
     path: capabilities/minecraft/break_block.v1.toml
   - name: robonix/primitive/minecraft/deposit_item

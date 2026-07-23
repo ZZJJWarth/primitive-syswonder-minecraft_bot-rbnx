@@ -123,10 +123,24 @@ in the snapshot after the player leaves, while revisiting a changed location
 updates or removes its entry. Scene consumes this stream alongside visual
 perception, so exact Minecraft blocks do not depend on YOLO vocabulary.
 
-Pilot can also compose three Minecraft item-action capabilities directly:
+Pilot can also compose five Minecraft state and action capabilities directly:
 
 - `robonix/primitive/minecraft/inventory` reports main inventory slots 0-35
   (hotbar 0-8) and offhand slot 40 with exact item registry names.
+- `robonix/primitive/minecraft/get_state` returns a fresh timestamped compact
+  snapshot of the player's Minecraft-world pose and status without changing
+  the player or world, together with its converted ROS navigation pose. A
+  Pilot deployment may inject this result into every planning round as
+  authoritative live state. Generic navigation uses the `navigation_*`
+  fields; native Minecraft coordinate targets use
+  `robonix/service/navigation/navigate_world`.
+- `robonix/primitive/minecraft/aim_at_block` gradually turns toward an explicit
+  loaded integer Minecraft world coordinate at bounded yaw and pitch rates.
+  Exact semantic object ids encode these coordinates after `@`; their
+  transformed ROS centroids must not be passed as block coordinates. It
+  succeeds only after the live crosshair stably hits the visible,
+  interaction-reachable block with the expected registry name, and does not
+  interact with that block.
 - `robonix/primitive/minecraft/break_block` targets the block currently under
   the crosshair, requires survival mode and either `minecraft:dirt` or
   `minecraft:crafting_table`, and can wait for matching synchronized pickup
@@ -137,10 +151,12 @@ Pilot can also compose three Minecraft item-action capabilities directly:
   `minecraft:crafting_table`, reporting synchronized player and container
   counts.
 
-These capabilities use ordinary client interactions rather than changing the
-world directly. Targets must be loaded, visible, and within interaction reach.
-Only one break or deposit operation runs at a time; disconnect, death, menu
-replacement, timeout, or a failed server synchronization returns an error.
+These capabilities use ordinary client state and interactions rather than
+changing the world directly. Targets must be loaded, visible, and within
+interaction reach. Only one aim, break, or deposit operation runs at a time;
+disconnect, death, menu replacement, timeout, or a failed server
+synchronization returns an error. Do not call aim directly while navigation
+reports `navigating`; wait for navigation to become terminal first.
 A typical Pilot composition is inventory inspection, explicit dirt breaking,
 another inventory inspection, Scene chest discovery and navigation, deposit,
 and final inventory verification.

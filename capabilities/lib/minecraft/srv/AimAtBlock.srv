@@ -1,0 +1,10 @@
+int32 x
+int32 y
+int32 z
+string expected_block
+---
+bool aimed
+string actual_block
+string hit_face
+float32 final_yaw_deg
+float32 final_pitch_deg

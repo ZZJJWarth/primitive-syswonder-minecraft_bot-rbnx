@@ -60,6 +60,21 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
   - Returns all 36 main inventory slots plus offhand slot 40 using exact item
     registry names. Slots 0-8 are the hotbar, and empty slots report
     `minecraft:air` with count zero.
+- `robonix/primitive/minecraft/get_state`
+  - Returns a fresh timestamped snapshot of the player's Minecraft-world
+    position, block position, view angles, dimension, grounded state, health,
+    food, and game mode without changing the player or world.
+  - Also returns `navigation_frame`, `navigation_x`, `navigation_y`, and
+    `navigation_yaw_rad` after converting Minecraft east/up/south coordinates
+    to ROS ENU. Use these fields with generic navigation. Native Minecraft
+    targets must go through `navigation/navigate_world`; do not relabel their
+    coordinates by merely changing or clearing a `PoseStamped` frame.
+- `robonix/primitive/minecraft/aim_at_block`
+  - Accepts an explicit loaded block coordinate and expected registry name,
+    then gradually turns the first-person view at bounded yaw and pitch rates.
+  - Succeeds only after the live Minecraft crosshair hits that visible,
+    interaction-reachable block for three consecutive client ticks. It does
+    not attack, use, place, or otherwise change the target block.
 - `robonix/primitive/minecraft/break_block`
   - Breaks the visible, reachable `minecraft:dirt` or
     `minecraft:crafting_table` block currently under the crosshair through
@@ -73,11 +88,11 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     trapped chest through normal menu clicks. Success requires the player count
     to fall by one and the container count to rise by one.
 
-The three Minecraft item-action capabilities are declared by the colocated
+The five Minecraft state and action capabilities are declared by the colocated
 `minecraft_mod_actions` primitive only after the Forge client has joined a
-world. Break and deposit operations are mutually exclusive and reject invalid
-game mode, target, reach, visibility, replacement, synchronization, and timeout
-conditions through the capability error path.
+world. Aim, break, and deposit operations are mutually exclusive and reject
+invalid game mode, target, reach, visibility, replacement, synchronization,
+and timeout conditions through the capability error path.
 
 The Mod binds its command interface to loopback only. The Python provider does
 not launch or stop the Minecraft client.
