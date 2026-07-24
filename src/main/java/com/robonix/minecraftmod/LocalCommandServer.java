@@ -139,6 +139,9 @@ public final class LocalCommandServer implements AutoCloseable {
             case "observe" -> observe();
             case "snapshot" -> CompletableFuture.completedFuture(snapshot());
             case "depth_snapshot" -> CompletableFuture.completedFuture(depthSnapshot());
+            case "lidar_scan" -> lidarScan(
+                    request.has("ray_count") ? request.get("ray_count").getAsInt() : 180,
+                    request.has("range_max") ? request.get("range_max").getAsDouble() : 16.0);
             case "move" -> request.has("distance")
                     ? control.moveDistance(
                             request.has("direction") ? request.get("direction").getAsString() : "forward",
@@ -185,6 +188,20 @@ public final class LocalCommandServer implements AutoCloseable {
         minecraft.execute(() -> {
             try {
                 result.complete(ObservationFactory.create(minecraft));
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
+    }
+
+    /** Schedules collision raycasts on the Minecraft client thread. */
+    private static CompletableFuture<JsonObject> lidarScan(int rayCount, double rangeMax) {
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            try {
+                result.complete(LidarScan.capture(minecraft, rayCount, rangeMax));
             } catch (Exception exception) {
                 result.completeExceptionally(exception);
             }

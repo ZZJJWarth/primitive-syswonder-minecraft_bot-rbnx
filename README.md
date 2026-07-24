@@ -116,6 +116,12 @@ coordinates (`x` east, `y` north), treats one block as one metre, and places
 `minecraft_view_base` at the configurable nominal eye height so view pitch
 remains part of the published pose while camera extrinsics stay fixed.
 
+The provider also publishes `/minecraft/lidar/scan` through
+`robonix/primitive/lidar/lidar`. This body-relative 360-degree
+`sensor_msgs/LaserScan` combines exact Minecraft collision raycasts at waist
+and head height. It is independent of the rendered depth buffer, so side and
+rear obstacles do not require turning the first-person camera.
+
 The provider also publishes exact semantic observations for visible chests,
 trapped chests, crafting tables, and furnaces. Discovery is local and occurs
 during exploration rather than preloading the world. Discovered blocks remain
@@ -208,12 +214,19 @@ that process itself. Only one wrapper may use a display at a time. Set
   valid range `0.1` through `60`.
 - `RBNX_MINECRAFT_ODOM_HZ`: odometry publication rate, default `10`; valid
   range `0.1` through `60`.
+- `RBNX_MINECRAFT_LIDAR_HZ`: LiDAR publication rate, default `5`; valid range
+  `0.1` through `60`.
+- `RBNX_MINECRAFT_LIDAR_RAY_COUNT`: samples per full revolution, default `180`;
+  valid range `16` through `1440`.
+- `RBNX_MINECRAFT_LIDAR_RANGE_MAX`: maximum collision-ray distance in metres,
+  default `16`; valid range `1` through `64`.
 - `RBNX_MINECRAFT_RGB_TOPIC`, `RBNX_MINECRAFT_DEPTH_TOPIC`,
   `RBNX_MINECRAFT_EXTRINSICS_TOPIC`, `RBNX_MINECRAFT_INTRINSICS_TOPIC`,
-  `RBNX_MINECRAFT_ODOM_TOPIC`,
+  `RBNX_MINECRAFT_ODOM_TOPIC`, `RBNX_MINECRAFT_LIDAR_TOPIC`,
   `RBNX_MINECRAFT_OBJECTS_TOPIC`: ROS 2 topic overrides.
 - `RBNX_MINECRAFT_CAMERA_FRAME_ID`, `RBNX_MINECRAFT_BASE_FRAME_ID`,
-  `RBNX_MINECRAFT_ODOM_FRAME_ID`: ROS frame overrides.
+  `RBNX_MINECRAFT_ODOM_FRAME_ID`, `RBNX_MINECRAFT_LIDAR_FRAME_ID`: ROS frame
+  overrides.
 - `RBNX_MINECRAFT_EYE_HEIGHT`: nominal player eye height in blocks, default
   `1.62`; valid range `0` through `3`.
 - `RBNX_MINECRAFT_CAPTURE_INTERVAL_MS`: minimum capture interval, default `200`.

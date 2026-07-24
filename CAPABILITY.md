@@ -4,6 +4,12 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
 
 ## Capabilities
 
+- `robonix/primitive/lidar/lidar`
+  - Publishes a best-effort `sensor_msgs/LaserScan` generated with exact
+    Minecraft collision raycasts rather than the rendered depth buffer.
+  - The full 360-degree scan combines waist and head-height rays, uses the
+    chassis base frame, and reports no-return rays as positive infinity.
+  - Default acquisition is 180 rays at 5 Hz with a 16 metre maximum range.
 - `robonix/primitive/camera/snapshot`
   - Returns the latest client framebuffer as a JPEG `sensor_msgs/Image`.
   - Frame capture is rate-limited and JPEG encoding runs outside the render

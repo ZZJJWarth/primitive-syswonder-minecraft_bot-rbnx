@@ -36,12 +36,14 @@ minecraft_perception = Primitive(
     id="minecraft_mod_perception",
     namespace="robonix/primitive/perception",
 )
+minecraft_lidar = Primitive(id="minecraft_mod_lidar", namespace="robonix/primitive/lidar")
 minecraft_actions = Primitive(
     id="minecraft_mod_actions",
     namespace="robonix/primitive/minecraft",
 )
 chassis_bootstrapped = False
 perception_bootstrapped = False
+lidar_bootstrapped = False
 actions_bootstrapped = False
 rgb_publisher = None
 depth_publisher = None
@@ -49,22 +51,30 @@ extrinsics_publisher = None
 intrinsics_publisher = None
 odom_publisher = None
 objects_publisher = None
+lidar_publisher = None
 camera_stream_stop = threading.Event()
 odom_stream_stop = threading.Event()
+lidar_stream_stop = threading.Event()
 camera_stream_thread: threading.Thread | None = None
 odom_stream_thread: threading.Thread | None = None
+lidar_stream_thread: threading.Thread | None = None
 camera_lifecycle_lock = threading.Lock()
 chassis_lifecycle_lock = threading.Lock()
 camera_worker_lock = threading.Lock()
 odom_worker_lock = threading.Lock()
+lidar_worker_lock = threading.Lock()
 stream_error_lock = threading.Lock()
 last_stream_errors: dict[str, tuple[str, float]] = {}
 previous_odom_sample: tuple[float, float, float, float] | None = None
 last_intrinsics: tuple[int, int, float] | None = None
 camera_stream_hz = 5.0
 odom_stream_hz = 10.0
+lidar_stream_hz = 5.0
+lidar_ray_count = 180
+lidar_range_max = 16.0
 camera_frame_id = "minecraft_camera_optical_frame"
 base_frame_id = "minecraft_view_base"
+lidar_frame_id = base_frame_id
 odom_frame_id = "minecraft_odom"
 eye_height = 1.62
 rgb_topic = "/minecraft/camera/rgb"
@@ -73,6 +83,7 @@ extrinsics_topic = "/minecraft/camera/extrinsics"
 intrinsics_topic = "/minecraft/camera/intrinsics"
 odom_topic = "/minecraft/chassis/odom"
 objects_topic = "/minecraft/perception/objects"
+lidar_topic = "/minecraft/lidar/scan"
 
 
 class MinecraftModClient:
@@ -261,6 +272,71 @@ def depth_view_to_image(result: dict[str, Any]) -> Image:
         step=width * 4,
         data=raw,
     )
+
+
+def lidar_scan_values(result: dict[str, Any]) -> dict[str, Any]:
+    """Validate one Mod collision scan and normalize missing returns to infinity."""
+    scan = result.get("lidarScan") or {}
+    raw_ranges = scan.get("ranges")
+    if not isinstance(raw_ranges, list) or len(raw_ranges) < 16:
+        raise ValueError("lidar scan must contain at least 16 ranges")
+    values = {
+        name: float(scan.get(source))
+        for name, source in (
+            ("timestamp", "timestampMs"),
+            ("angle_min", "angleMin"),
+            ("angle_max", "angleMax"),
+            ("angle_increment", "angleIncrement"),
+            ("range_min", "rangeMin"),
+            ("range_max", "rangeMax"),
+        )
+    }
+    if not all(math.isfinite(value) for value in values.values()):
+        raise ValueError("lidar scan metadata must be finite")
+    if values["timestamp"] <= 0.0:
+        raise ValueError("lidar timestamp must be positive")
+    if values["angle_increment"] <= 0.0:
+        raise ValueError("lidar angle increment must be positive")
+    if not 0.0 <= values["range_min"] < values["range_max"]:
+        raise ValueError("lidar range limits are invalid")
+    expected_max = values["angle_min"] + (len(raw_ranges) - 1) * values["angle_increment"]
+    if not math.isclose(values["angle_max"], expected_max, rel_tol=1e-6, abs_tol=1e-6):
+        raise ValueError("lidar angular metadata does not match its ranges")
+    ranges: list[float] = []
+    for raw in raw_ranges:
+        if raw is None:
+            ranges.append(math.inf)
+            continue
+        distance = float(raw)
+        if not math.isfinite(distance) or distance < 0.0:
+            raise ValueError("lidar ranges must be finite non-negative values or null")
+        ranges.append(distance)
+    values["timestamp"] /= 1000.0
+    values["ranges"] = ranges
+    return values
+
+
+def publish_lidar_scan(result: dict[str, Any]) -> None:
+    """Publish one validated body-relative collision scan as ROS LaserScan."""
+    if lidar_publisher is None:
+        raise RuntimeError("lidar publisher is not initialized")
+    from sensor_msgs.msg import LaserScan  # type: ignore
+
+    values = lidar_scan_values(result)
+    message = LaserScan()
+    timestamp = values["timestamp"]
+    message.header.stamp.sec = int(timestamp)
+    message.header.stamp.nanosec = int((timestamp % 1.0) * 1e9)
+    message.header.frame_id = lidar_frame_id
+    message.angle_min = values["angle_min"]
+    message.angle_max = values["angle_max"]
+    message.angle_increment = values["angle_increment"]
+    message.time_increment = 0.0
+    message.scan_time = 1.0 / lidar_stream_hz
+    message.range_min = values["range_min"]
+    message.range_max = values["range_max"]
+    message.ranges = values["ranges"]
+    lidar_publisher.publish(message)
 
 
 def publish_ros_image(publisher: Any, image: Image) -> None:
@@ -473,6 +549,31 @@ def configured_frequency(name: str, fallback: float) -> float:
     return value
 
 
+def configured_lidar_ray_count(config: dict[str, Any]) -> int:
+    """Read the full-revolution sample count within the Mod's safe bound."""
+    raw = config.get("lidar_ray_count", os.environ.get(
+        "RBNX_MINECRAFT_LIDAR_RAY_COUNT",
+        "180",
+    ))
+    if isinstance(raw, bool):
+        raise ValueError("lidar_ray_count must be an integer from 16 through 1440")
+    value = int(raw)
+    if value != float(raw) or not 16 <= value <= 1440:
+        raise ValueError("lidar_ray_count must be an integer from 16 through 1440")
+    return value
+
+
+def configured_lidar_range(config: dict[str, Any]) -> float:
+    """Read the collision-ray range within loaded-world and map bounds."""
+    value = float(config.get("lidar_range_max", os.environ.get(
+        "RBNX_MINECRAFT_LIDAR_RANGE_MAX",
+        "16.0",
+    )))
+    if not math.isfinite(value) or not 1.0 <= value <= 64.0:
+        raise ValueError("lidar_range_max must be finite and from 1 through 64")
+    return value
+
+
 def configured_eye_height(config: dict[str, Any]) -> float:
     """Read nominal eye height and require a finite value from zero through three blocks."""
     raw = config["eye_height"] if "eye_height" in config else os.environ.get(
@@ -545,6 +646,23 @@ def odom_stream_loop() -> None:
         odom_stream_stop.wait(max(0.0, interval - (time.monotonic() - started)))
 
 
+def lidar_stream_loop() -> None:
+    """Poll exact collision rays independently from the rendered camera streams."""
+    interval = 1.0 / lidar_stream_hz
+    while not lidar_stream_stop.is_set():
+        started = time.monotonic()
+        try:
+            result = client.request({
+                "cmd": "lidar_scan",
+                "ray_count": lidar_ray_count,
+                "range_max": lidar_range_max,
+            })
+            publish_lidar_scan(result)
+        except Exception as exc:  # noqa: BLE001
+            log_stream_error("lidar", exc)
+        lidar_stream_stop.wait(max(0.0, interval - (time.monotonic() - started)))
+
+
 def start_camera_stream() -> None:
     """Start one camera publisher worker unless it is already alive."""
     global camera_stream_thread
@@ -576,6 +694,21 @@ def start_odom_stream() -> None:
         odom_stream_thread.start()
 
 
+def start_lidar_stream() -> None:
+    """Start one collision-scan publisher worker unless it is already alive."""
+    global lidar_stream_thread
+    with lidar_worker_lock:
+        if lidar_stream_thread is not None and lidar_stream_thread.is_alive():
+            return
+        lidar_stream_stop.clear()
+        lidar_stream_thread = threading.Thread(
+            target=lidar_stream_loop,
+            name="minecraft-lidar-stream",
+            daemon=True,
+        )
+        lidar_stream_thread.start()
+
+
 def stop_camera_stream() -> bool:
     """Signal the RGB/depth worker, join its current request, and report shutdown."""
     with camera_worker_lock:
@@ -592,6 +725,17 @@ def stop_odom_stream() -> bool:
     with odom_worker_lock:
         odom_stream_stop.set()
         worker = odom_stream_thread
+        if worker is None or worker is threading.current_thread():
+            return True
+        worker.join(timeout=client.timeout + 1.0)
+        return not worker.is_alive()
+
+
+def stop_lidar_stream() -> bool:
+    """Signal the LiDAR worker, join its current request, and report shutdown."""
+    with lidar_worker_lock:
+        lidar_stream_stop.set()
+        worker = lidar_stream_thread
         if worker is None or worker is threading.current_thread():
             return True
         worker.join(timeout=client.timeout + 1.0)
@@ -660,6 +804,15 @@ def bootstrap_perception() -> None:
         return
     minecraft_perception.bootstrap()
     perception_bootstrapped = True
+
+
+def bootstrap_lidar() -> None:
+    """Register the collision scan publisher under the standard lidar namespace."""
+    global lidar_bootstrapped
+    if lidar_bootstrapped:
+        return
+    minecraft_lidar.bootstrap()
+    lidar_bootstrapped = True
 
 
 def bootstrap_actions() -> None:
@@ -1076,11 +1229,12 @@ def init_mod(config: dict[str, Any]):
 def initialize_camera(config: dict[str, Any]):
     """Initialize camera streams and the colocated chassis after Mod readiness."""
     global rgb_publisher, depth_publisher, extrinsics_publisher, intrinsics_publisher
-    global objects_publisher
-    global camera_frame_id, base_frame_id, eye_height
+    global objects_publisher, lidar_publisher
+    global camera_frame_id, base_frame_id, lidar_frame_id, eye_height
     global rgb_topic, depth_topic, extrinsics_topic, intrinsics_topic
-    global odom_topic, odom_frame_id, objects_topic
-    global camera_stream_hz, odom_stream_hz
+    global odom_topic, odom_frame_id, objects_topic, lidar_topic
+    global camera_stream_hz, odom_stream_hz, lidar_stream_hz
+    global lidar_ray_count, lidar_range_max
     ready = init_mod(config)
     if isinstance(ready, Err):
         return ready
@@ -1090,6 +1244,7 @@ def initialize_camera(config: dict[str, Any]):
         extrinsics_publisher,
         intrinsics_publisher,
         objects_publisher,
+        lidar_publisher,
     )
     if all(publisher is not None for publisher in camera_publishers):
         if odom_publisher is not None:
@@ -1102,16 +1257,22 @@ def initialize_camera(config: dict[str, Any]):
         return Err("camera publisher initialization is incomplete; restart the provider")
     try:
         from geometry_msgs.msg import TransformStamped  # type: ignore
-        from sensor_msgs.msg import CameraInfo, Image as RosImage  # type: ignore
+        from sensor_msgs.msg import CameraInfo, Image as RosImage, LaserScan  # type: ignore
         from std_msgs.msg import String  # type: ignore
 
         camera_stream_hz = configured_frequency("RBNX_MINECRAFT_CAMERA_STREAM_HZ", 5.0)
         odom_stream_hz = configured_frequency("RBNX_MINECRAFT_ODOM_HZ", 10.0)
+        lidar_stream_hz = configured_frequency("RBNX_MINECRAFT_LIDAR_HZ", 5.0)
+        lidar_ray_count = configured_lidar_ray_count(config)
+        lidar_range_max = configured_lidar_range(config)
         camera_frame_id = str(config.get("camera_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_CAMERA_FRAME_ID", camera_frame_id,
         ))
         base_frame_id = str(config.get("base_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_BASE_FRAME_ID", base_frame_id,
+        ))
+        lidar_frame_id = str(config.get("lidar_frame_id") or os.environ.get(
+            "RBNX_MINECRAFT_LIDAR_FRAME_ID", base_frame_id,
         ))
         eye_height = configured_eye_height(config)
         rgb_topic = str(config.get("rgb_topic") or os.environ.get(
@@ -1132,10 +1293,14 @@ def initialize_camera(config: dict[str, Any]):
         objects_topic = str(config.get("objects_topic") or os.environ.get(
             "RBNX_MINECRAFT_OBJECTS_TOPIC", objects_topic,
         ))
+        lidar_topic = str(config.get("lidar_topic") or os.environ.get(
+            "RBNX_MINECRAFT_LIDAR_TOPIC", lidar_topic,
+        ))
         odom_frame_id = str(config.get("odom_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_ODOM_FRAME_ID", odom_frame_id,
         ))
         bootstrap_perception()
+        bootstrap_lidar()
         rgb_publisher = minecraft_camera.create_publisher(
             "robonix/primitive/camera/rgb",
             topic=rgb_topic,
@@ -1166,6 +1331,12 @@ def initialize_camera(config: dict[str, Any]):
             msg_type=String,
             qos="latched",
         )
+        lidar_publisher = minecraft_lidar.create_publisher(
+            "robonix/primitive/lidar/lidar",
+            topic=lidar_topic,
+            msg_type=LaserScan,
+            qos="best_effort",
+        )
         publish_extrinsics()
     except Exception as exc:  # noqa: BLE001
         return Err(f"ROS2 camera stream initialization failed: {exc}")
@@ -1194,20 +1365,25 @@ def activate_camera():
             depth_publisher,
             extrinsics_publisher,
             intrinsics_publisher,
+            lidar_publisher,
         )):
-            return Err("camera streams are not initialized")
+            return Err("camera and lidar streams are not initialized")
         chassis_result = drive_chassis(CMD_ACTIVATE)
         if isinstance(chassis_result, Err):
             return chassis_result
         try:
             publish_extrinsics()
             start_camera_stream()
+            start_lidar_stream()
         except Exception as exc:  # noqa: BLE001
             camera_stopped = stop_camera_stream()
+            lidar_stopped = stop_lidar_stream()
             rollback = drive_chassis(CMD_DEACTIVATE)
             detail = f"camera stream activation failed: {exc}"
             if not camera_stopped:
                 detail += "; camera worker rollback timed out"
+            if not lidar_stopped:
+                detail += "; lidar worker rollback timed out"
             if isinstance(rollback, Err):
                 detail += f"; chassis rollback failed: {rollback.message}"
             return Err(detail)
@@ -1219,9 +1395,12 @@ def deactivate_camera():
     """Stop camera publication and deactivate chassis odometry through Driver."""
     with camera_lifecycle_lock:
         camera_stopped = stop_camera_stream()
+        lidar_stopped = stop_lidar_stream()
         chassis_result = drive_chassis(CMD_DEACTIVATE)
     if not camera_stopped:
         return Err("camera stream worker did not stop before timeout")
+    if not lidar_stopped:
+        return Err("lidar stream worker did not stop before timeout")
     if isinstance(chassis_result, Err):
         return chassis_result
     return Ok()
@@ -1232,6 +1411,7 @@ def shutdown_camera():
     """Stop camera publication and deactivate chassis before process teardown."""
     with camera_lifecycle_lock:
         camera_stopped = stop_camera_stream()
+        lidar_stopped = stop_lidar_stream()
         chassis_result = (
             drive_chassis(CMD_DEACTIVATE)
             if chassis_bootstrapped
@@ -1239,6 +1419,8 @@ def shutdown_camera():
         )
     if not camera_stopped:
         return Err("camera stream worker did not stop before timeout")
+    if not lidar_stopped:
+        return Err("lidar stream worker did not stop before timeout")
     if isinstance(chassis_result, Err):
         return chassis_result
     return Ok()

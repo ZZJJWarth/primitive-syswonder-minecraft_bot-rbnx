@@ -37,3 +37,16 @@ config:
 
   # string, ROS topic, default: /minecraft/perception/objects.
   objects_topic: /minecraft/perception/objects
+
+  # string, ROS topic, default: /minecraft/lidar/scan.
+  lidar_topic: /minecraft/lidar/scan
+
+  # string, ROS frame ID, default: base_frame_id.
+  # Scan angle zero points forward and positive angles point left.
+  lidar_frame_id: minecraft_view_base
+
+  # integer, rays/revolution, default: 180; must be within [16, 1440].
+  lidar_ray_count: 180
+
+  # float, metres, default: 16; must be finite and within [1, 64].
+  lidar_range_max: 16.0

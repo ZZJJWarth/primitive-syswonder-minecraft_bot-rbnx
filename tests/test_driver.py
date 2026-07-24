@@ -21,10 +21,13 @@ from minecraft_mod_driver.driver import (
     MinecraftModClient,
     configured_eye_height,
     configured_frequency,
+    configured_lidar_range,
+    configured_lidar_ray_count,
     depth_view_to_image,
     execute_move_command,
     observation_pose,
     observation_timestamp,
+    lidar_scan_values,
     quaternion_from_yaw_pitch,
     rendered_view_to_rgb_image,
     rendered_view_to_image,
@@ -40,7 +43,54 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertEqual(driver.minecraft_camera.namespace, "robonix/primitive/camera")
         self.assertEqual(driver.minecraft_chassis.namespace, "robonix/primitive/chassis")
         self.assertEqual(driver.minecraft_perception.namespace, "robonix/primitive/perception")
+        self.assertEqual(driver.minecraft_lidar.namespace, "robonix/primitive/lidar")
         self.assertEqual(driver.minecraft_actions.namespace, "robonix/primitive/minecraft")
+
+    def test_lidar_scan_normalizes_no_return_and_preserves_angles(self) -> None:
+        """Convert JSON null to the standard positive-infinity LaserScan return."""
+        result = {
+            "lidarScan": {
+                "timestampMs": 1_750_000_000_250,
+                "angleMin": -math.pi,
+                "angleMax": -math.pi + 15 * math.pi / 8,
+                "angleIncrement": math.pi / 8,
+                "rangeMin": 0.05,
+                "rangeMax": 16.0,
+                "ranges": [None, 2.5] + [4.0] * 14,
+            },
+        }
+
+        scan = lidar_scan_values(result)
+
+        self.assertTrue(math.isinf(scan["ranges"][0]))
+        self.assertEqual(scan["ranges"][1], 2.5)
+        self.assertAlmostEqual(scan["timestamp"], 1_750_000_000.25)
+        self.assertAlmostEqual(scan["angle_increment"], math.pi / 8)
+
+    def test_lidar_scan_rejects_inconsistent_angular_metadata(self) -> None:
+        """Do not publish a scan whose declared angles disagree with its samples."""
+        result = {
+            "lidarScan": {
+                "timestampMs": 1_750_000_000_250,
+                "angleMin": -math.pi,
+                "angleMax": math.pi,
+                "angleIncrement": math.pi / 8,
+                "rangeMin": 0.05,
+                "rangeMax": 16.0,
+                "ranges": [None] * 16,
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "angular metadata"):
+            lidar_scan_values(result)
+
+    def test_lidar_configuration_is_bounded(self) -> None:
+        """Reject scan settings that can overload the client thread or leave the map."""
+        self.assertEqual(configured_lidar_ray_count({"lidar_ray_count": 180}), 180)
+        self.assertEqual(configured_lidar_range({"lidar_range_max": 16}), 16.0)
+        with self.assertRaisesRegex(ValueError, "16 through 1440"):
+            configured_lidar_ray_count({"lidar_ray_count": 8})
+        with self.assertRaisesRegex(ValueError, "1 through 64"):
+            configured_lidar_range({"lidar_range_max": float("inf")})
 
     def test_inventory_maps_all_stable_slots(self) -> None:
         """Translate the exact 36 main slots and offhand slot without mutation."""
