@@ -139,10 +139,13 @@ class MinecraftModClientTest(unittest.TestCase):
             "collect": True,
         })
 
-    def test_aim_at_block_forwards_coordinates_and_verifies_live_hit(self) -> None:
-        """Expose only a Mod-confirmed stable crosshair hit to the caller."""
+    def test_aim_at_block_converts_scene_centroid_and_verifies_live_hit(self) -> None:
+        """Convert the selected Scene block centre instead of relying on VLM arithmetic."""
         message = driver.minecraft_mcp.AimAtBlock_Request(
-            x=2, y=64, z=-3, expected_block="minecraft:chest",
+            navigation_x=9.5,
+            navigation_y=-7.5,
+            navigation_z=0.5,
+            expected_block="minecraft:chest",
         )
         result = {
             "aimed": True,
@@ -157,16 +160,19 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertEqual(response.hit_face, "north")
         self.assertEqual(request.call_args.args[0], {
             "cmd": "aim_at_block",
-            "x": 2,
-            "y": 64,
-            "z": -3,
+            "x": 9,
+            "y": 0,
+            "z": 7,
             "expected_block": "minecraft:chest",
         })
 
     def test_aim_at_block_rejects_unverified_mod_result(self) -> None:
         """Reject mismatched blocks, invalid faces, and impossible final pitch."""
         message = driver.minecraft_mcp.AimAtBlock_Request(
-            x=2, y=64, z=-3, expected_block="minecraft:chest",
+            navigation_x=2.5,
+            navigation_y=2.5,
+            navigation_z=64.5,
+            expected_block="minecraft:chest",
         )
         valid = {
             "aimed": True,
@@ -186,6 +192,32 @@ class MinecraftModClientTest(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, error):
                     driver.aim_at_block_mcp(message)
+
+    def test_aim_at_block_rejects_nonfinite_scene_centroid(self) -> None:
+        """Do not turn a malformed Scene coordinate into an arbitrary BlockPos."""
+        message = driver.minecraft_mcp.AimAtBlock_Request(
+            navigation_x=float("nan"),
+            navigation_y=-7.5,
+            navigation_z=0.5,
+            expected_block="minecraft:crafting_table",
+        )
+        with patch.object(driver.client, "request") as request:
+            with self.assertRaisesRegex(ValueError, "must be finite"):
+                driver.aim_at_block_mcp(message)
+        request.assert_not_called()
+
+    def test_aim_at_block_rejects_robot_or_approach_pose(self) -> None:
+        """Only exact half-block Scene centroids may cross the frame boundary."""
+        message = driver.minecraft_mcp.AimAtBlock_Request(
+            navigation_x=10.401299,
+            navigation_y=-6.178009,
+            navigation_z=0.5,
+            expected_block="minecraft:crafting_table",
+        )
+        with patch.object(driver.client, "request") as request:
+            with self.assertRaisesRegex(ValueError, "exact Scene block-centre"):
+                driver.aim_at_block_mcp(message)
+        request.assert_not_called()
 
     def test_break_block_rejects_unsupported_block_before_request(self) -> None:
         """Reject blocks outside the confirmed dirt and crafting-table set."""

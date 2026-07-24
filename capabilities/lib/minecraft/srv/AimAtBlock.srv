@@ -1,6 +1,8 @@
-int32 x
-int32 y
-int32 z
+# Exact block-centre coordinates returned by Scene in minecraft_odom.
+# The provider converts these ROS ENU coordinates to a Minecraft BlockPos.
+float64 navigation_x
+float64 navigation_y
+float64 navigation_z
 string expected_block
 ---
 bool aimed

@@ -831,13 +831,34 @@ def aim_at_block_mcp(
 ) -> minecraft_mcp.AimAtBlock_Response:
     """Gradually aim the live crosshair at one visible reachable block.
 
-    Use integer Minecraft world coordinates, such as the coordinates encoded
-    after `@` in an exact semantic object's id; do not pass its transformed ROS
-    centroid. `expected_block` is the exact namespaced registry name. This
-    capability only turns the view and never attacks or uses the target. Wait
-    until navigation is terminal before calling it.
+    Accept the exact block-centre coordinates returned by Scene in
+    ``minecraft_odom`` and convert them here instead of asking the VLM to
+    transpose axes and remove the centre offset. ``expected_block`` is the
+    exact namespaced registry name. This capability only turns the view and
+    never attacks or uses the target. Wait until navigation is terminal before
+    calling it.
     """
-    x, y, z = validated_coordinates(req)
+    navigation_values = (
+        float(req.navigation_x),
+        float(req.navigation_y),
+        float(req.navigation_z),
+    )
+    if not all(math.isfinite(value) for value in navigation_values):
+        raise ValueError("Scene navigation coordinates must be finite")
+    if not all(
+        math.isclose(value - math.floor(value), 0.5, abs_tol=1e-6)
+        for value in navigation_values
+    ):
+        raise ValueError(
+            "coordinates must be an exact Scene block-centre, not a robot or goal_near pose"
+        )
+    navigation_x, navigation_y, navigation_z = navigation_values
+    # Exact semantic blocks are published at their centres:
+    # odom x = block x + 0.5; odom y = -(block z + 0.5);
+    # odom z = block y + 0.5.
+    x = math.floor(navigation_x)
+    y = math.floor(navigation_z)
+    z = math.floor(-navigation_y)
     expected = registry_name(req.expected_block, "expected_block")
     result = action_request({
         "cmd": "aim_at_block",

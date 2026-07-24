@@ -70,8 +70,10 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     targets must go through `navigation/navigate_world`; do not relabel their
     coordinates by merely changing or clearing a `PoseStamped` frame.
 - `robonix/primitive/minecraft/aim_at_block`
-  - Accepts an explicit loaded block coordinate and expected registry name,
-    then gradually turns the first-person view at bounded yaw and pitch rates.
+  - Accepts the exact `minecraft_odom` block-centre coordinate returned by
+    Scene and an expected registry name, converts it to a native Minecraft
+    block position internally, then gradually turns the first-person view at
+    bounded yaw and pitch rates. Robot and `scene/goal_near` poses are rejected.
   - Succeeds only after the live Minecraft crosshair hits that visible,
     interaction-reachable block for three consecutive client ticks. It does
     not attack, use, place, or otherwise change the target block.

@@ -134,13 +134,13 @@ Pilot can also compose five Minecraft state and action capabilities directly:
   authoritative live state. Generic navigation uses the `navigation_*`
   fields; native Minecraft coordinate targets use
   `robonix/service/navigation/navigate_world`.
-- `robonix/primitive/minecraft/aim_at_block` gradually turns toward an explicit
-  loaded integer Minecraft world coordinate at bounded yaw and pitch rates.
-  Exact semantic object ids encode these coordinates after `@`; their
-  transformed ROS centroids must not be passed as block coordinates. It
-  succeeds only after the live crosshair stably hits the visible,
-  interaction-reachable block with the expected registry name, and does not
-  interact with that block.
+- `robonix/primitive/minecraft/aim_at_block` gradually turns toward an exact
+  Scene object at bounded yaw and pitch rates. Pass the object's
+  `minecraft_odom` centroid unchanged as `navigation_x/y/z`; the provider
+  converts it to the native Minecraft block position. Do not pass the robot
+  pose or the approach pose returned by `scene/goal_near`. It succeeds only
+  after the live crosshair stably hits the visible, interaction-reachable block
+  with the expected registry name, and does not interact with that block.
 - `robonix/primitive/minecraft/break_block` targets the block currently under
   the crosshair, requires survival mode and either `minecraft:dirt` or
   `minecraft:crafting_table`, and can wait for matching synchronized pickup
