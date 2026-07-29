@@ -21,6 +21,9 @@ from PIL import Image as PILImage
 import minecraft_mod_driver.driver as driver
 from minecraft_mod_driver.driver import (
     MinecraftModClient,
+    cmd_vel_message_values,
+    cmd_vel_payload,
+    configured_cmd_vel_bridge,
     configured_eye_height,
     configured_frequency,
     configured_lidar_range,
@@ -109,6 +112,49 @@ class MinecraftModClientTest(unittest.TestCase):
             configured_lidar_ray_count({"lidar_ray_count": 8})
         with self.assertRaisesRegex(ValueError, "1 through 64"):
             configured_lidar_range({"lidar_range_max": float("inf")})
+
+    def test_cmd_vel_bridge_configuration_is_bounded(self) -> None:
+        """Reject ambiguous topics and unsafe command/deadman limits."""
+        self.assertEqual(
+            configured_cmd_vel_bridge({}),
+            ("/cmd_vel", 0.25, 0.5, 1.2, 1.0),
+        )
+        with self.assertRaisesRegex(ValueError, "fully-qualified"):
+            configured_cmd_vel_bridge({"cmd_vel_topic": "cmd_vel"})
+        with self.assertRaisesRegex(ValueError, "command duration"):
+            configured_cmd_vel_bridge({
+                "cmd_vel_command_duration_sec": 0.5,
+                "cmd_vel_timeout_sec": 0.25,
+            })
+
+    def test_cmd_vel_translates_planar_twist_to_bounded_mod_chunk(self) -> None:
+        """Preserve REP-103 forward/left/yaw signs at the Minecraft boundary."""
+        vector = lambda x=0.0, y=0.0, z=0.0: SimpleNamespace(x=x, y=y, z=z)
+        message = SimpleNamespace(
+            linear=vector(x=0.8),
+            angular=vector(z=0.4),
+        )
+
+        self.assertEqual(cmd_vel_message_values(message), (0.8, 0.0, 0.4))
+        payload = cmd_vel_payload(0.8, 0.0, 0.4, 0.25)
+        self.assertEqual(payload["cmd"], "move")
+        self.assertEqual(payload["duration_ms"], 250)
+        self.assertAlmostEqual(payload["yaw_degrees"], math.degrees(0.1))
+        self.assertEqual(cmd_vel_payload(0.0, 0.0, 0.0, 0.25), {"cmd": "stop"})
+
+    def test_cmd_vel_rejects_nonplanar_or_excessive_motion(self) -> None:
+        """Fail closed before unsupported Nav2 motion reaches the Mod."""
+        vector = lambda x=0.0, y=0.0, z=0.0: SimpleNamespace(x=x, y=y, z=z)
+        with self.assertRaisesRegex(ValueError, "only planar"):
+            cmd_vel_message_values(SimpleNamespace(
+                linear=vector(z=0.1),
+                angular=vector(),
+            ))
+        with self.assertRaisesRegex(ValueError, "configured limit"):
+            cmd_vel_message_values(SimpleNamespace(
+                linear=vector(x=driver.cmd_vel_max_linear + 0.1),
+                angular=vector(),
+            ))
 
     def test_inventory_maps_all_stable_slots(self) -> None:
         """Translate the exact 36 main slots and offhand slot without mutation."""
@@ -568,13 +614,13 @@ class MinecraftModClientTest(unittest.TestCase):
                 },
             },
         }
-        published: list[str] = []
+        published: list[object] = []
 
         def publish(_publisher, image) -> None:
             """Record valid output and stop the single test iteration."""
             if image.encoding == "error":
                 raise RuntimeError("invalid RGB")
-            published.append(image.encoding)
+            published.append(image)
             driver.camera_stream_stop.set()
 
         driver.camera_stream_stop.clear()
@@ -588,8 +634,16 @@ class MinecraftModClientTest(unittest.TestCase):
                 driver.camera_stream_loop()
         finally:
             driver.camera_stream_stop.clear()
-        self.assertEqual(published, ["32FC1"])
-        publish_intrinsics.assert_called_once_with(1, 1, 70.0)
+        self.assertEqual([image.encoding for image in published], ["32FC1"])
+        stamp = publish_intrinsics.call_args.args[3]
+        self.assertEqual(
+            (stamp.sec, stamp.nanosec),
+            (
+                published[0].header.stamp.sec,
+                published[0].header.stamp.nanosec,
+            ),
+        )
+        publish_intrinsics.assert_called_once_with(1, 1, 70.0, stamp)
 
     def test_publish_intrinsics_uses_depth_shape_and_vertical_fov(self) -> None:
         """Publish a latched-compatible pinhole matrix for the captured frame."""
@@ -598,7 +652,10 @@ class MinecraftModClientTest(unittest.TestCase):
 
             def __init__(self) -> None:
                 """Initialize the ROS message fields needed by the helper."""
-                self.header = SimpleNamespace(frame_id="")
+                self.header = SimpleNamespace(
+                    stamp=SimpleNamespace(sec=0, nanosec=0),
+                    frame_id="",
+                )
                 self.width = 0
                 self.height = 0
                 self.distortion_model = ""
@@ -613,30 +670,32 @@ class MinecraftModClientTest(unittest.TestCase):
         sensor_msgs.msg = sensor_msgs_msg
         publisher = SimpleNamespace(publish=Mock())
         previous_publisher = driver.intrinsics_publisher
-        previous_calibration = driver.last_intrinsics
         driver.intrinsics_publisher = publisher
-        driver.last_intrinsics = None
+        stamp = SimpleNamespace(sec=123, nanosec=456)
         try:
             with patch.dict(
                 sys.modules,
                 {"sensor_msgs": sensor_msgs, "sensor_msgs.msg": sensor_msgs_msg},
             ):
-                driver.publish_intrinsics(960, 540, 70.0)
-                driver.publish_intrinsics(960, 540, 70.0)
+                driver.publish_intrinsics(960, 540, 70.0, stamp)
+                driver.publish_intrinsics(960, 540, 70.0, stamp)
         finally:
             driver.intrinsics_publisher = previous_publisher
-            driver.last_intrinsics = previous_calibration
-        publisher.publish.assert_called_once()
+        self.assertEqual(publisher.publish.call_count, 2)
         message = publisher.publish.call_args.args[0]
         focal = 540.0 / (2.0 * math.tan(math.radians(35.0)))
         self.assertEqual((message.width, message.height), (960, 540))
         self.assertEqual(message.header.frame_id, driver.camera_frame_id)
+        self.assertEqual(
+            (message.header.stamp.sec, message.header.stamp.nanosec),
+            (123, 456),
+        )
         self.assertAlmostEqual(message.k[0], focal)
         self.assertAlmostEqual(message.k[4], focal)
         self.assertEqual((message.k[2], message.k[5]), (479.5, 269.5))
 
     def test_publish_odom_maps_frames_pose_and_velocity(self) -> None:
-        """Populate ROS odometry fields with ENU pose and body-frame velocity."""
+        """Publish matching ENU odometry and odom-to-base TF samples."""
         class FakeOdometry:
             """Provide the nested mutable fields used by publish_odom."""
 
@@ -657,25 +716,54 @@ class MinecraftModClientTest(unittest.TestCase):
                     angular=vector(),
                 ))
 
+        class FakeTransformStamped:
+            """Provide the nested mutable fields used by the TF broadcaster."""
+
+            def __init__(self) -> None:
+                """Create one mutable TransformStamped-shaped object."""
+                vector = lambda: SimpleNamespace(x=0.0, y=0.0, z=0.0)
+                self.header = SimpleNamespace(
+                    stamp=SimpleNamespace(sec=0, nanosec=0),
+                    frame_id="",
+                )
+                self.child_frame_id = ""
+                self.transform = SimpleNamespace(
+                    translation=vector(),
+                    rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=0.0),
+                )
+
         nav_msgs = ModuleType("nav_msgs")
         nav_msgs_msg = ModuleType("nav_msgs.msg")
         nav_msgs_msg.Odometry = FakeOdometry
         nav_msgs.msg = nav_msgs_msg
+        geometry_msgs = ModuleType("geometry_msgs")
+        geometry_msgs_msg = ModuleType("geometry_msgs.msg")
+        geometry_msgs_msg.TransformStamped = FakeTransformStamped
+        geometry_msgs.msg = geometry_msgs_msg
         publisher = SimpleNamespace(publish=Mock())
+        broadcaster = SimpleNamespace(sendTransform=Mock())
         observation = {
             "position": {"x": 4.0, "y": 64.0, "z": 3.0},
             "yaw": 0.0,
             "pitch": 0.0,
         }
         previous_publisher = driver.odom_publisher
+        previous_broadcaster = driver.odom_transform_broadcaster
         previous_sample = driver.previous_odom_sample
         driver.odom_publisher = publisher
+        driver.odom_transform_broadcaster = broadcaster
         driver.previous_odom_sample = (9.0, 4.0, -2.0, math.pi / 2.0)
         try:
-            with patch.dict(sys.modules, {"nav_msgs": nav_msgs, "nav_msgs.msg": nav_msgs_msg}):
+            with patch.dict(sys.modules, {
+                "geometry_msgs": geometry_msgs,
+                "geometry_msgs.msg": geometry_msgs_msg,
+                "nav_msgs": nav_msgs,
+                "nav_msgs.msg": nav_msgs_msg,
+            }):
                 driver.publish_odom(observation, timestamp=10.0)
         finally:
             driver.odom_publisher = previous_publisher
+            driver.odom_transform_broadcaster = previous_broadcaster
             driver.previous_odom_sample = previous_sample
         message = publisher.publish.call_args.args[0]
         self.assertEqual((message.header.frame_id, message.child_frame_id), (
@@ -684,6 +772,81 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertEqual((message.pose.pose.position.x, message.pose.pose.position.y), (4.0, -3.0))
         self.assertAlmostEqual(message.twist.twist.linear.x, -1.0)
         self.assertAlmostEqual(message.twist.twist.linear.y, 0.0)
+        transform = broadcaster.sendTransform.call_args.args[0]
+        self.assertEqual(
+            (transform.header.stamp.sec, transform.header.stamp.nanosec),
+            (message.header.stamp.sec, message.header.stamp.nanosec),
+        )
+        self.assertEqual((transform.header.frame_id, transform.child_frame_id), (
+            driver.odom_frame_id, driver.base_frame_id,
+        ))
+        self.assertEqual((
+            transform.transform.translation.x,
+            transform.transform.translation.y,
+            transform.transform.translation.z,
+        ), (
+            message.pose.pose.position.x,
+            message.pose.pose.position.y,
+            message.pose.pose.position.z,
+        ))
+        self.assertEqual((
+            transform.transform.rotation.x,
+            transform.transform.rotation.y,
+            transform.transform.rotation.z,
+            transform.transform.rotation.w,
+        ), (
+            message.pose.pose.orientation.x,
+            message.pose.pose.orientation.y,
+            message.pose.pose.orientation.z,
+            message.pose.pose.orientation.w,
+        ))
+
+    def test_publish_extrinsics_also_broadcasts_static_tf(self) -> None:
+        """Keep the extrinsics capability and standard TF tree identical."""
+        class FakeTransformStamped:
+            """Provide the fixed transform fields populated by the provider."""
+
+            def __init__(self) -> None:
+                """Create one mutable TransformStamped-shaped object."""
+                self.header = SimpleNamespace(
+                    stamp=SimpleNamespace(sec=0, nanosec=0),
+                    frame_id="",
+                )
+                self.child_frame_id = ""
+                self.transform = SimpleNamespace(
+                    rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=0.0),
+                )
+
+        geometry_msgs = ModuleType("geometry_msgs")
+        geometry_msgs_msg = ModuleType("geometry_msgs.msg")
+        geometry_msgs_msg.TransformStamped = FakeTransformStamped
+        geometry_msgs.msg = geometry_msgs_msg
+        publisher = SimpleNamespace(publish=Mock())
+        broadcaster = SimpleNamespace(sendTransform=Mock())
+        previous_publisher = driver.extrinsics_publisher
+        previous_broadcaster = driver.static_transform_broadcaster
+        driver.extrinsics_publisher = publisher
+        driver.static_transform_broadcaster = broadcaster
+        try:
+            with patch.dict(sys.modules, {
+                "geometry_msgs": geometry_msgs,
+                "geometry_msgs.msg": geometry_msgs_msg,
+            }):
+                driver.publish_extrinsics()
+        finally:
+            driver.extrinsics_publisher = previous_publisher
+            driver.static_transform_broadcaster = previous_broadcaster
+        message = publisher.publish.call_args.args[0]
+        broadcaster.sendTransform.assert_called_once_with(message)
+        self.assertEqual((message.header.frame_id, message.child_frame_id), (
+            driver.base_frame_id, driver.camera_frame_id,
+        ))
+        self.assertEqual((
+            message.transform.rotation.x,
+            message.transform.rotation.y,
+            message.transform.rotation.z,
+            message.transform.rotation.w,
+        ), (-0.5, 0.5, -0.5, 0.5))
 
     def test_zero_move_stops_without_forward_motion(self) -> None:
         """Translate an all-zero chassis command to stop rather than forward."""

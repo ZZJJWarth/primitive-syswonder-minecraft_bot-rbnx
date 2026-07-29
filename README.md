@@ -139,6 +139,14 @@ stream continues if the other capture fails. The odometry frame uses ROS ENU
 coordinates (`x` east, `y` north), treats one block as one metre, and places
 `minecraft_view_base` at the configurable nominal eye height so view pitch
 remains part of the published pose while camera extrinsics stay fixed.
+Each odometry sample is also broadcast as the dynamic TF
+`minecraft_odom → minecraft_view_base` with the same timestamp and pose. The
+fixed view-base-to-camera transform is mirrored to `/tf_static`, providing the
+standard TF chain consumed by generic Robonix mapping and Nav2 services.
+The active chassis also subscribes to generic Navigation's guarded `/cmd_vel`
+output. It validates planar Twist limits, applies the newest command in bounded
+0.25-second Mod chunks, and sends an explicit stop after a 0.5-second command
+timeout or any chassis lifecycle stop.
 
 The provider also publishes `/minecraft/lidar/scan` through
 `robonix/primitive/lidar/lidar`. This body-relative 360-degree

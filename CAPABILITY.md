@@ -28,6 +28,8 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
 - `robonix/primitive/camera/extrinsics`
   - Publishes the fixed view-base to camera-optical transform with latched
     delivery.
+  - Broadcasts the same fixed transform over `/tf_static` for standard ROS
+    consumers.
 - `robonix/primitive/chassis/move`
   - Applies forward/backward distances up to 32 blocks through Minecraft key
     mappings and stops using measured player displacement.
@@ -52,6 +54,14 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
 - `robonix/primitive/chassis/odom`
   - Publishes player pose with a configurable nominal eye height and derived
     planar velocity in a ROS ENU odometry frame. One block is one metre.
+  - Broadcasts every odometry pose with the same timestamp as the dynamic TF
+    `minecraft_odom → minecraft_view_base` (using the configured frame names),
+    enabling generic mapping and Nav2 providers without a Minecraft-specific
+    transform adapter.
+  - While the chassis lifecycle is active, a bounded `/cmd_vel` bridge accepts
+    planar ROS Twist commands from generic Navigation. It executes only short
+    latest-command chunks and explicitly stops when commands become stale,
+    during deactivation, or during shutdown.
 - `robonix/primitive/chassis/driver`
   - Shares the same Forge client connection as the camera primitive.
 - `robonix/primitive/perception/objects`

@@ -18,6 +18,7 @@ from typing import Any
 
 from robonix_api import ATLAS, Err, Ok, Primitive, Transport
 from robonix_api.lifecycle import CMD_ACTIVATE, CMD_DEACTIVATE, CMD_INIT
+from robonix_api.ros import RosBackend
 import chassis_mcp  # noqa: E402
 import minecraft_mcp  # noqa: E402
 import chassis_pb2  # noqa: E402
@@ -52,21 +53,28 @@ intrinsics_publisher = None
 odom_publisher = None
 objects_publisher = None
 lidar_publisher = None
+odom_transform_broadcaster = None
+static_transform_broadcaster = None
+cmd_vel_subscription = None
 camera_stream_stop = threading.Event()
 odom_stream_stop = threading.Event()
 lidar_stream_stop = threading.Event()
+cmd_vel_bridge_stop = threading.Event()
 camera_stream_thread: threading.Thread | None = None
 odom_stream_thread: threading.Thread | None = None
 lidar_stream_thread: threading.Thread | None = None
+cmd_vel_bridge_thread: threading.Thread | None = None
 camera_lifecycle_lock = threading.Lock()
 chassis_lifecycle_lock = threading.Lock()
 camera_worker_lock = threading.Lock()
 odom_worker_lock = threading.Lock()
 lidar_worker_lock = threading.Lock()
+cmd_vel_worker_lock = threading.Lock()
+cmd_vel_state_lock = threading.Lock()
 stream_error_lock = threading.Lock()
 last_stream_errors: dict[str, tuple[str, float]] = {}
+latest_cmd_vel: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 previous_odom_sample: tuple[float, float, float, float] | None = None
-last_intrinsics: tuple[int, int, float] | None = None
 camera_stream_hz = 5.0
 odom_stream_hz = 10.0
 lidar_stream_hz = 5.0
@@ -84,6 +92,11 @@ intrinsics_topic = "/minecraft/camera/intrinsics"
 odom_topic = "/minecraft/chassis/odom"
 objects_topic = "/minecraft/perception/objects"
 lidar_topic = "/minecraft/lidar/scan"
+cmd_vel_topic = "/cmd_vel"
+cmd_vel_command_duration_sec = 0.25
+cmd_vel_timeout_sec = 0.5
+cmd_vel_max_linear = 1.2
+cmd_vel_max_angular = 1.0
 
 
 class MinecraftModClient:
@@ -447,6 +460,8 @@ def publish_extrinsics() -> None:
     """Publish the fixed view-base to optical-frame axis conversion."""
     if extrinsics_publisher is None:
         raise RuntimeError("camera extrinsics publisher is not initialized")
+    if static_transform_broadcaster is None:
+        raise RuntimeError("static transform broadcaster is not initialized")
     from geometry_msgs.msg import TransformStamped  # type: ignore
 
     message = TransformStamped()
@@ -460,15 +475,20 @@ def publish_extrinsics() -> None:
     message.transform.rotation.z = -0.5
     message.transform.rotation.w = 0.5
     extrinsics_publisher.publish(message)
+    static_transform_broadcaster.sendTransform(message)
 
 
-def publish_intrinsics(width: int, height: int, vertical_fov_deg: float) -> None:
-    """Publish pinhole calibration for the current Minecraft depth frame.
+def publish_intrinsics(
+    width: int,
+    height: int,
+    vertical_fov_deg: float,
+    stamp: Any,
+) -> None:
+    """Publish timestamp-matched pinhole calibration for one depth frame.
 
     Minecraft's FOV setting is vertical. Capture scaling preserves aspect
     ratio, so square pixels use the same focal length on both axes.
     """
-    global last_intrinsics
     if intrinsics_publisher is None:
         raise RuntimeError("camera intrinsics publisher is not initialized")
     values = (float(width), float(height), float(vertical_fov_deg))
@@ -476,9 +496,6 @@ def publish_intrinsics(width: int, height: int, vertical_fov_deg: float) -> None
         raise ValueError("camera dimensions and vertical FOV must be positive and finite")
     if vertical_fov_deg >= 180.0:
         raise ValueError("camera vertical FOV must be less than 180 degrees")
-    calibration = (width, height, vertical_fov_deg)
-    if calibration == last_intrinsics:
-        return
     from sensor_msgs.msg import CameraInfo  # type: ignore
 
     focal = height / (2.0 * math.tan(math.radians(vertical_fov_deg) / 2.0))
@@ -486,6 +503,8 @@ def publish_intrinsics(width: int, height: int, vertical_fov_deg: float) -> None
     cy = (height - 1.0) / 2.0
     message = CameraInfo()
     message.header.frame_id = camera_frame_id
+    message.header.stamp.sec = int(stamp.sec)
+    message.header.stamp.nanosec = int(stamp.nanosec)
     message.width = width
     message.height = height
     message.distortion_model = "plumb_bob"
@@ -494,14 +513,16 @@ def publish_intrinsics(width: int, height: int, vertical_fov_deg: float) -> None
     message.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
     message.p = [focal, 0.0, cx, 0.0, 0.0, focal, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
     intrinsics_publisher.publish(message)
-    last_intrinsics = calibration
 
 
 def publish_odom(observation: dict[str, Any], timestamp: float | None = None) -> None:
-    """Publish exact player view pose and finite-difference planar velocity."""
+    """Publish exact player view odometry and its matching dynamic transform."""
     global previous_odom_sample
     if odom_publisher is None:
         raise RuntimeError("chassis odom publisher is not initialized")
+    if odom_transform_broadcaster is None:
+        raise RuntimeError("odometry transform broadcaster is not initialized")
+    from geometry_msgs.msg import TransformStamped  # type: ignore
     from nav_msgs.msg import Odometry  # type: ignore
 
     now = timestamp if timestamp is not None else time.time()
@@ -539,6 +560,20 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
     message.twist.twist.linear.y = left
     message.twist.twist.angular.z = angular
     odom_publisher.publish(message)
+
+    transform = TransformStamped()
+    transform.header.stamp.sec = message.header.stamp.sec
+    transform.header.stamp.nanosec = message.header.stamp.nanosec
+    transform.header.frame_id = message.header.frame_id
+    transform.child_frame_id = message.child_frame_id
+    transform.transform.translation.x = message.pose.pose.position.x
+    transform.transform.translation.y = message.pose.pose.position.y
+    transform.transform.translation.z = message.pose.pose.position.z
+    transform.transform.rotation.x = message.pose.pose.orientation.x
+    transform.transform.rotation.y = message.pose.pose.orientation.y
+    transform.transform.rotation.z = message.pose.pose.orientation.z
+    transform.transform.rotation.w = message.pose.pose.orientation.w
+    odom_transform_broadcaster.sendTransform(transform)
 
 
 def configured_frequency(name: str, fallback: float) -> float:
@@ -585,6 +620,127 @@ def configured_eye_height(config: dict[str, Any]) -> float:
     return value
 
 
+def configured_cmd_vel_bridge(
+    config: dict[str, Any],
+) -> tuple[str, float, float, float, float]:
+    """Validate the bounded ROS Twist bridge configuration."""
+    topic = str(config.get("cmd_vel_topic") or os.environ.get(
+        "RBNX_MINECRAFT_CMD_VEL_TOPIC", "/cmd_vel",
+    )).strip()
+    token = r"[A-Za-z_][A-Za-z0-9_]*"
+    if re.fullmatch(rf"/{token}(?:/{token})*", topic) is None:
+        raise ValueError("cmd_vel_topic must be a fully-qualified ROS topic")
+    duration = float(config.get("cmd_vel_command_duration_sec", os.environ.get(
+        "RBNX_MINECRAFT_CMD_VEL_DURATION_SEC", "0.25",
+    )))
+    timeout = float(config.get("cmd_vel_timeout_sec", os.environ.get(
+        "RBNX_MINECRAFT_CMD_VEL_TIMEOUT_SEC", "0.5",
+    )))
+    max_linear = float(config.get("cmd_vel_max_linear", os.environ.get(
+        "RBNX_MINECRAFT_CMD_VEL_MAX_LINEAR", "1.2",
+    )))
+    max_angular = float(config.get("cmd_vel_max_angular", os.environ.get(
+        "RBNX_MINECRAFT_CMD_VEL_MAX_ANGULAR", "1.0",
+    )))
+    values = (duration, timeout, max_linear, max_angular)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("cmd_vel bridge limits must be finite")
+    if not 0.05 <= duration <= 1.0:
+        raise ValueError("cmd_vel_command_duration_sec must be within [0.05, 1]")
+    if not duration <= timeout <= 5.0:
+        raise ValueError("cmd_vel_timeout_sec must be from command duration through 5")
+    if not 0.0 < max_linear <= 4.317:
+        raise ValueError("cmd_vel_max_linear must be within (0, 4.317]")
+    if not 0.0 < max_angular <= math.pi:
+        raise ValueError("cmd_vel_max_angular must be within (0, pi]")
+    return topic, duration, timeout, max_linear, max_angular
+
+
+def cmd_vel_message_values(message: Any) -> tuple[float, float, float]:
+    """Validate a planar Nav2 Twist and return Minecraft-relative velocities."""
+    linear = message.linear
+    angular = message.angular
+    values = tuple(float(value) for value in (
+        linear.x,
+        linear.y,
+        linear.z,
+        angular.x,
+        angular.y,
+        angular.z,
+    ))
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("cmd_vel fields must be finite")
+    linear_x, linear_y, linear_z, angular_x, angular_y, angular_z = values
+    if any(abs(value) > 1e-9 for value in (linear_z, angular_x, angular_y)):
+        raise ValueError("cmd_vel supports only planar linear x/y and angular z")
+    if math.hypot(linear_x, linear_y) > cmd_vel_max_linear:
+        raise ValueError("cmd_vel planar velocity exceeds configured limit")
+    if abs(angular_z) > cmd_vel_max_angular:
+        raise ValueError("cmd_vel angular velocity exceeds configured limit")
+    return linear_x, linear_y, angular_z
+
+
+def cmd_vel_payload(
+    linear_x: float,
+    linear_y: float,
+    angular_z: float,
+    duration_sec: float,
+) -> dict[str, Any]:
+    """Translate one validated planar Twist sample into the Mod protocol."""
+    if linear_x == 0.0 and linear_y == 0.0 and angular_z == 0.0:
+        return {"cmd": "stop"}
+    return {
+        "cmd": "move",
+        "linear_x": linear_x,
+        "linear_y": linear_y,
+        "yaw_degrees": math.degrees(angular_z * duration_sec),
+        "pitch_degrees": 0.0,
+        "duration_ms": round(duration_sec * 1000),
+    }
+
+
+def receive_cmd_vel(message: Any) -> None:
+    """Retain only the newest safe Nav2 velocity command for the worker."""
+    global latest_cmd_vel
+    try:
+        linear_x, linear_y, angular_z = cmd_vel_message_values(message)
+    except Exception as exc:  # noqa: BLE001
+        log_stream_error("cmd_vel", exc)
+        linear_x = linear_y = angular_z = 0.0
+    with cmd_vel_state_lock:
+        latest_cmd_vel = (linear_x, linear_y, angular_z, time.monotonic())
+
+
+def cmd_vel_bridge_loop() -> None:
+    """Execute short Twist chunks and stop when Nav2 commands become stale."""
+    active = False
+    while not cmd_vel_bridge_stop.is_set():
+        with cmd_vel_state_lock:
+            linear_x, linear_y, angular_z, received_at = latest_cmd_vel
+        if received_at <= 0.0 or time.monotonic() - received_at > cmd_vel_timeout_sec:
+            linear_x = linear_y = angular_z = 0.0
+        moving = any(value != 0.0 for value in (linear_x, linear_y, angular_z))
+        if not moving and not active:
+            cmd_vel_bridge_stop.wait(0.05)
+            continue
+        try:
+            client.request(cmd_vel_payload(
+                linear_x,
+                linear_y,
+                angular_z,
+                cmd_vel_command_duration_sec,
+            ))
+            active = moving
+        except Exception as exc:  # noqa: BLE001
+            if not cmd_vel_bridge_stop.is_set():
+                log_stream_error("cmd_vel", exc)
+            active = False
+    try:
+        client.request({"cmd": "stop"})
+    except Exception as exc:  # noqa: BLE001
+        log_stream_error("cmd_vel stop", exc)
+
+
 def log_stream_error(stream: str, error: Exception) -> None:
     """Print changed stream errors immediately and repeated errors at most every five seconds."""
     message = str(error)
@@ -617,6 +773,7 @@ def camera_stream_loop() -> None:
                 depth.width,
                 depth.height,
                 float(depth_view.get("verticalFovDeg") or 0.0),
+                depth.header.stamp,
             )
             publish_ros_image(depth_publisher, depth)
         except Exception as exc:  # noqa: BLE001
@@ -709,6 +866,23 @@ def start_lidar_stream() -> None:
         lidar_stream_thread.start()
 
 
+def start_cmd_vel_bridge() -> None:
+    """Start one latest-command Twist worker with an initially stopped state."""
+    global cmd_vel_bridge_thread, latest_cmd_vel
+    with cmd_vel_worker_lock:
+        if cmd_vel_bridge_thread is not None and cmd_vel_bridge_thread.is_alive():
+            return
+        with cmd_vel_state_lock:
+            latest_cmd_vel = (0.0, 0.0, 0.0, 0.0)
+        cmd_vel_bridge_stop.clear()
+        cmd_vel_bridge_thread = threading.Thread(
+            target=cmd_vel_bridge_loop,
+            name="minecraft-cmd-vel-bridge",
+            daemon=True,
+        )
+        cmd_vel_bridge_thread.start()
+
+
 def stop_camera_stream() -> bool:
     """Signal the RGB/depth worker, join its current request, and report shutdown."""
     with camera_worker_lock:
@@ -736,6 +910,21 @@ def stop_lidar_stream() -> bool:
     with lidar_worker_lock:
         lidar_stream_stop.set()
         worker = lidar_stream_thread
+        if worker is None or worker is threading.current_thread():
+            return True
+        worker.join(timeout=client.timeout + 1.0)
+        return not worker.is_alive()
+
+
+def stop_cmd_vel_bridge() -> bool:
+    """Stop Nav2 motion immediately and join the Twist worker."""
+    with cmd_vel_worker_lock:
+        cmd_vel_bridge_stop.set()
+        worker = cmd_vel_bridge_thread
+        try:
+            client.request({"cmd": "stop"})
+        except Exception as exc:  # noqa: BLE001
+            log_stream_error("cmd_vel stop", exc)
         if worker is None or worker is threading.current_thread():
             return True
         worker.join(timeout=client.timeout + 1.0)
@@ -1230,6 +1419,7 @@ def initialize_camera(config: dict[str, Any]):
     """Initialize camera streams and the colocated chassis after Mod readiness."""
     global rgb_publisher, depth_publisher, extrinsics_publisher, intrinsics_publisher
     global objects_publisher, lidar_publisher
+    global static_transform_broadcaster
     global camera_frame_id, base_frame_id, lidar_frame_id, eye_height
     global rgb_topic, depth_topic, extrinsics_topic, intrinsics_topic
     global odom_topic, odom_frame_id, objects_topic, lidar_topic
@@ -1337,6 +1527,11 @@ def initialize_camera(config: dict[str, Any]):
             msg_type=LaserScan,
             qos="best_effort",
         )
+        from tf2_ros import StaticTransformBroadcaster  # type: ignore
+
+        static_transform_broadcaster = StaticTransformBroadcaster(
+            RosBackend.get().node,
+        )
         publish_extrinsics()
     except Exception as exc:  # noqa: BLE001
         return Err(f"ROS2 camera stream initialization failed: {exc}")
@@ -1428,13 +1623,17 @@ def shutdown_camera():
 
 def initialize_chassis(config: dict[str, Any]):
     """Initialize the ROS odometry publisher under the chassis namespace."""
-    global odom_publisher, odom_topic, odom_frame_id, base_frame_id
-    if odom_publisher is not None:
+    global odom_publisher, odom_transform_broadcaster, cmd_vel_subscription
+    global odom_topic, odom_frame_id, base_frame_id
+    global cmd_vel_topic, cmd_vel_command_duration_sec, cmd_vel_timeout_sec
+    global cmd_vel_max_linear, cmd_vel_max_angular
+    if odom_publisher is not None and odom_transform_broadcaster is not None:
         return Ok()
     ready = init_mod(config)
     if isinstance(ready, Err):
         return ready
     try:
+        from geometry_msgs.msg import Twist  # type: ignore
         from nav_msgs.msg import Odometry  # type: ignore
 
         odom_topic = str(config.get("odom_topic") or os.environ.get(
@@ -1446,12 +1645,33 @@ def initialize_chassis(config: dict[str, Any]):
         base_frame_id = str(config.get("base_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_BASE_FRAME_ID", base_frame_id,
         ))
-        odom_publisher = minecraft_chassis.create_publisher(
-            "robonix/primitive/chassis/odom",
-            topic=odom_topic,
-            msg_type=Odometry,
-            qos="reliable",
-        )
+        (
+            cmd_vel_topic,
+            cmd_vel_command_duration_sec,
+            cmd_vel_timeout_sec,
+            cmd_vel_max_linear,
+            cmd_vel_max_angular,
+        ) = configured_cmd_vel_bridge(config)
+        if odom_publisher is None:
+            odom_publisher = minecraft_chassis.create_publisher(
+                "robonix/primitive/chassis/odom",
+                topic=odom_topic,
+                msg_type=Odometry,
+                qos="reliable",
+            )
+        if cmd_vel_subscription is None:
+            cmd_vel_subscription = RosBackend.get().node.create_subscription(
+                Twist,
+                cmd_vel_topic,
+                receive_cmd_vel,
+                10,
+            )
+        if odom_transform_broadcaster is None:
+            from tf2_ros import TransformBroadcaster  # type: ignore
+
+            odom_transform_broadcaster = TransformBroadcaster(
+                RosBackend.get().node,
+            )
     except Exception as exc:  # noqa: BLE001
         return Err(f"ROS2 odom stream initialization failed: {exc}")
     return Ok()
@@ -1466,18 +1686,21 @@ def init_chassis(config: dict[str, Any]):
 
 @minecraft_chassis.on_activate
 def activate_chassis():
-    """Start continuous player-view odometry publication."""
+    """Start continuous odometry and the bounded Nav2 Twist bridge."""
     with chassis_lifecycle_lock:
         if odom_publisher is None:
             return Err("chassis odometry is not initialized")
         start_odom_stream()
+        start_cmd_vel_bridge()
     return Ok()
 
 
 @minecraft_chassis.on_deactivate
 def deactivate_chassis():
-    """Stop odometry publication while retaining its configured topic."""
+    """Stop odometry and fail closed on any active Nav2 velocity."""
     with chassis_lifecycle_lock:
+        if not stop_cmd_vel_bridge():
+            return Err("cmd_vel bridge worker did not stop before timeout")
         if not stop_odom_stream():
             return Err("odometry stream worker did not stop before timeout")
     return Ok()
@@ -1485,8 +1708,10 @@ def deactivate_chassis():
 
 @minecraft_chassis.on_shutdown
 def shutdown_chassis():
-    """Stop the odometry worker before chassis provider teardown."""
+    """Stop all chassis workers before provider teardown."""
     with chassis_lifecycle_lock:
+        if not stop_cmd_vel_bridge():
+            return Err("cmd_vel bridge worker did not stop before timeout")
         if not stop_odom_stream():
             return Err("odometry stream worker did not stop before timeout")
     return Ok()

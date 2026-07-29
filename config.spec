@@ -4,16 +4,18 @@ config:
   ready_timeout_ms: 30000
 
   # string, ROS frame ID, default: minecraft_camera_optical_frame.
-  # Optical frame assigned to RGB, depth, and camera calibration messages;
-  # initialization fails when ROS 2 rejects the configured frame or topic setup.
+  # Optical frame assigned to RGB, depth, camera calibration, and the static
+  # base-frame transform; initialization fails when ROS 2 rejects the
+  # configured frame or topic setup.
   camera_frame_id: minecraft_camera_optical_frame
 
   # string, ROS frame ID, default: minecraft_view_base.
-  # Player view-base frame used as the odometry child and camera parent.
+  # Player view-base frame used as the odometry/TF child and camera parent.
   base_frame_id: minecraft_view_base
 
   # string, ROS frame ID, default: minecraft_odom.
-  # Fixed ENU frame used for player odometry and exact block observations.
+  # Fixed ENU frame used for player odometry, its dynamic TF, and exact block
+  # observations.
   odom_frame_id: minecraft_odom
 
   # float, blocks/metres, default: 1.62; must be finite and within [0, 3].
@@ -50,3 +52,22 @@ config:
 
   # float, metres, default: 16; must be finite and within [1, 64].
   lidar_range_max: 16.0
+
+  # string, fully-qualified ROS topic, default: /cmd_vel.
+  # Generic Navigation's guarded Twist output. The bridge is active only while
+  # the chassis lifecycle is ACTIVE.
+  cmd_vel_topic: /cmd_vel
+
+  # float, seconds, default: 0.25; must be within [0.05, 1].
+  # Each latest-command velocity is executed as this bounded Mod movement chunk.
+  cmd_vel_command_duration_sec: 0.25
+
+  # float, seconds, default: 0.5; must be >= command duration and <= 5.
+  # A stale Nav2 command triggers an explicit stop.
+  cmd_vel_timeout_sec: 0.5
+
+  # float, blocks/metres per second, default: 1.2; must be within (0, 4.317].
+  cmd_vel_max_linear: 1.2
+
+  # float, radians per second, default: 1.0; must be within (0, pi].
+  cmd_vel_max_angular: 1.0
