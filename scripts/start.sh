@@ -8,6 +8,7 @@ USE_NVIDIA="${RBNX_MINECRAFT_USE_NVIDIA:-0}"
 CLIENT_PID=""
 PROVIDER_PID=""
 VIEWER_PID=""
+CHAT_PID=""
 if [ ! -x "$VENV/bin/python3" ]; then
   bash "$PKG_ROOT/scripts/build.sh"
 fi
@@ -104,6 +105,10 @@ cleanup() {
     kill -TERM "$VIEWER_PID" 2>/dev/null || true
     wait "$VIEWER_PID" 2>/dev/null || true
   fi
+  if [ -n "$CHAT_PID" ] && kill -0 "$CHAT_PID" 2>/dev/null; then
+    kill -TERM "$CHAT_PID" 2>/dev/null || true
+    wait "$CHAT_PID" 2>/dev/null || true
+  fi
 }
 
 trap cleanup EXIT
@@ -121,10 +126,17 @@ fi
 
 "$VENV/bin/python3" "$PKG_ROOT/scripts/viewer.py" &
 VIEWER_PID=$!
+if [ "${RBNX_MINECRAFT_CHAT_ENABLED:-1}" != "0" ]; then
+  "$VENV/bin/python3" -m minecraft_chat_bridge.bridge &
+  CHAT_PID=$!
+fi
 "$VENV/bin/python3" -m minecraft_mod_driver.driver &
 PROVIDER_PID=$!
 
 WAIT_PIDS=("$VIEWER_PID" "$PROVIDER_PID")
+if [ -n "$CHAT_PID" ]; then
+  WAIT_PIDS+=("$CHAT_PID")
+fi
 if [ -n "$CLIENT_PID" ]; then
   WAIT_PIDS+=("$CLIENT_PID")
 fi
@@ -144,6 +156,12 @@ if [ -n "$CLIENT_PID" ] && [ "$FINISHED_PID" = "$CLIENT_PID" ]; then
 elif [ "$FINISHED_PID" = "$VIEWER_PID" ]; then
   VIEWER_PID=""
   echo "[minecraft-mod] web viewer exited; stopping provider and client" >&2
+  if [ "$FINISHED_STATUS" -eq 0 ]; then
+    exit 1
+  fi
+elif [ -n "$CHAT_PID" ] && [ "$FINISHED_PID" = "$CHAT_PID" ]; then
+  CHAT_PID=""
+  echo "[minecraft-mod] chat bridge exited; stopping provider and client" >&2
   if [ "$FINISHED_STATUS" -eq 0 ]; then
     exit 1
   fi

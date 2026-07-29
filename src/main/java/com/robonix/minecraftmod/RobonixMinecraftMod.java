@@ -18,7 +18,9 @@ public final class RobonixMinecraftMod {
         DepthCapture depthCapture = new DepthCapture();
         MinecraftControl control = new MinecraftControl();
         MinecraftActions actions = new MinecraftActions(control);
-        LocalCommandServer server = new LocalCommandServer(frameCapture, depthCapture, control, actions);
+        MinecraftChatBridge chatBridge = new MinecraftChatBridge();
+        LocalCommandServer server = new LocalCommandServer(
+                frameCapture, depthCapture, control, actions, chatBridge);
 
         MinecraftForge.EVENT_BUS.addListener(frameCapture::onRenderGui);
         MinecraftForge.EVENT_BUS.addListener(frameCapture::onRenderScreen);
@@ -26,6 +28,7 @@ public final class RobonixMinecraftMod {
         MinecraftForge.EVENT_BUS.addListener(control::onClientTick);
         MinecraftForge.EVENT_BUS.addListener(control::onMovementInput);
         MinecraftForge.EVENT_BUS.addListener(actions::onClientTick);
+        MinecraftForge.EVENT_BUS.addListener(chatBridge::onPlayerChat);
         server.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

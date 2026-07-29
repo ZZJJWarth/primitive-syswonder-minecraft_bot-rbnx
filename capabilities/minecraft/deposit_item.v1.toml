@@ -4,6 +4,7 @@ id      = "robonix/primitive/minecraft/deposit_item"
 version = "1"
 kind    = "primitive"
 idl     = "minecraft/srv/DepositItem.srv"
+description = "Deposit exactly one supported main-inventory item into a visible reachable chest and verify both inventory counts. IMPORTANT coordinate contract: x/y/z are the native Minecraft BlockPos, never the Scene minecraft_odom centroid and never a scene/goal_near pose. For a Scene block centre (scene_x, scene_y, scene_z), first call aim_at_block with those three values unchanged and require aimed=true; then convert deterministically for deposit_item as x=floor(scene_x), y=floor(scene_z), z=floor(-scene_y). Example: Scene (47.5,18.5,5.5) means native BlockPos (47,5,-19), not (47,18,5). Do not round or directly copy Scene axes. If deposit_item returns a reach, visibility, target, interaction, synchronization, or timeout error, call minecraft_manual.manual_lookup with the exact error before any retry; do not repeat identical arguments."
 
 [mode]
 type = "rpc"

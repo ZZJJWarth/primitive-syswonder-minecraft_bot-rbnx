@@ -9,8 +9,10 @@ import os
 import socket
 import sys
 import threading
+import tomllib
 import unittest
 from io import BytesIO
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -45,6 +47,22 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertEqual(driver.minecraft_perception.namespace, "robonix/primitive/perception")
         self.assertEqual(driver.minecraft_lidar.namespace, "robonix/primitive/lidar")
         self.assertEqual(driver.minecraft_actions.namespace, "robonix/primitive/minecraft")
+
+    def test_deposit_prompt_requires_conversion_aim_and_manual(self) -> None:
+        """Keep the VLM-facing contract explicit about all recovery preconditions."""
+        contract = (
+            Path(__file__).resolve().parents[1]
+            / "capabilities"
+            / "minecraft"
+            / "deposit_item.v1.toml"
+        )
+        with contract.open("rb") as stream:
+            description = tomllib.load(stream)["contract"]["description"]
+        self.assertIn("native Minecraft BlockPos", description)
+        self.assertIn("x=floor(scene_x)", description)
+        self.assertIn("first call aim_at_block", description)
+        self.assertIn("call minecraft_manual.manual_lookup", description)
+        self.assertIn("before any retry", description)
 
     def test_lidar_scan_normalizes_no_return_and_preserves_angles(self) -> None:
         """Convert JSON null to the standard positive-infinity LaserScan return."""

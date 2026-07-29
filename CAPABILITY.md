@@ -95,6 +95,19 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     `minecraft:crafting_table` into an explicit, visible, reachable chest or
     trapped chest through normal menu clicks. Success requires the player count
     to fall by one and the container count to rise by one.
+  - Its integer `x/y/z` fields are a native Minecraft `BlockPos`, not Scene
+    `minecraft_odom` coordinates and not a `scene/goal_near` approach pose. For
+    an exact Scene centre `(scene_x, scene_y, scene_z)`, convert only with
+    `x=floor(scene_x)`, `y=floor(scene_z)`, `z=floor(-scene_y)`. For example,
+    Scene `(47.5, 18.5, 5.5)` is Minecraft `(47, 5, -19)`.
+  - Before depositing into a Scene-selected chest, call `aim_at_block` with
+    that Scene centre unchanged and require `aimed=true`; only then call
+    `deposit_item` with the converted native coordinates.
+  - A reach, visibility, wrong-target, rejected-interaction, synchronization,
+    or timeout error is contextual. Call
+    `robonix/service/minecraft/manual/lookup` with the exact failure before any
+    retry. Never repeat identical deposit arguments without new evidence and
+    manual guidance.
 
 The five Minecraft state and action capabilities are declared by the colocated
 `minecraft_mod_actions` primitive only after the Forge client has joined a

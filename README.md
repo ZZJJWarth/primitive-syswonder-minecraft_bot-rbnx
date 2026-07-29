@@ -85,6 +85,30 @@ little-endian `32FC1` metres with sky pixels set to `NaN`. When that player
 dies, the Mod automatically requests a respawn and releases any active
 movement key.
 
+### Server chat
+
+The package also starts a Minecraft-chat frontend automatically. A server
+player can submit natural-language tasks without running `rbnx chat`:
+
+```text
+@bot 探索附近区域
+@bot 现在在哪里
+@bot stop
+```
+
+The Forge Mod captures only signed player messages beginning with
+`RBNX_MINECRAFT_CHAT_PREFIX` (default `@bot`). A local Python bridge forwards
+the instruction to Liaison, keeps one Pilot session per player UUID, and sends
+concise progress and final answers back as the bot player. Set
+`RBNX_MINECRAFT_CHAT_ALLOWED_PLAYERS` to a comma-separated list of player UUIDs
+or exact player names on shared servers. An empty list permits every player.
+`stop`, `cancel`, `abort`, `停止`, and `取消` request cancellation of that
+player's current Pilot turn.
+
+The bridge uses `ROBONIX_LIAISON_ENDPOINT` (default `127.0.0.1:50081`) and the
+existing loopback-only Mod command interface. Set
+`RBNX_MINECRAFT_CHAT_ENABLED=0` to disable it.
+
 Chassis move has three exclusive modes. `forward_m` is a signed relative
 distance in blocks (positive forward, negative backward, absolute value at
 most `32`). `rotate_deg` is a signed relative total yaw angle in degrees
@@ -152,10 +176,13 @@ Pilot can also compose five Minecraft state and action capabilities directly:
   `minecraft:crafting_table`, and can wait for matching synchronized pickup
   verification. It stops attacking and walks toward the former block centre
   when collection is requested. Aim at the intended block before calling it.
-- `robonix/primitive/minecraft/deposit_item` accepts explicit chest coordinates
-  and transfers exactly one main-inventory `minecraft:dirt` or
+- `robonix/primitive/minecraft/deposit_item` accepts a native Minecraft chest
+  `BlockPos` and transfers exactly one main-inventory `minecraft:dirt` or
   `minecraft:crafting_table`, reporting synchronized player and container
-  counts.
+  counts. Never copy Scene `minecraft_odom` axes directly into `x/y/z`. Convert
+  an exact Scene centre with `x=floor(scene_x)`, `y=floor(scene_z)`,
+  `z=floor(-scene_y)`, after `aim_at_block` has verified the unchanged Scene
+  centroid.
 
 These capabilities use ordinary client state and interactions rather than
 changing the world directly. Targets must be loaded, visible, and within
@@ -208,6 +235,14 @@ that process itself. Only one wrapper may use a display at a time. Set
 ## Configuration
 
 - `RBNX_MINECRAFT_MOD_PORT`: loopback command port, default `25576`.
+- `RBNX_MINECRAFT_CHAT_ENABLED`: start the server-chat frontend, default `1`.
+- `RBNX_MINECRAFT_CHAT_PREFIX`: addressed-message prefix, default `@bot`.
+- `RBNX_MINECRAFT_CHAT_ALLOWED_PLAYERS`: optional comma-separated UUID/name
+  allowlist; empty permits all players.
+- `RBNX_MINECRAFT_CHAT_PROGRESS_SEC`: minimum interval between non-critical
+  progress messages, default `5`.
+- `ROBONIX_LIAISON_ENDPOINT`: Liaison gRPC endpoint, default
+  `127.0.0.1:50081`.
 - `RBNX_MINECRAFT_ROS_SETUP`: ROS 2 `setup.bash`; defaults to an installed
   Jazzy or Humble setup.
 - `RBNX_MINECRAFT_CAMERA_STREAM_HZ`: RGB/depth publication rate, default `5`;

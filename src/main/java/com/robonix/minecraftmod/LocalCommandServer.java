@@ -29,6 +29,7 @@ public final class LocalCommandServer implements AutoCloseable {
     private final DepthCapture depthCapture;
     private final MinecraftControl control;
     private final MinecraftActions actions;
+    private final MinecraftChatBridge chatBridge;
     private final int port = envPort();
     private final ExecutorService connections = Executors.newFixedThreadPool(4, runnable -> {
         Thread thread = new Thread(runnable, "robonix-command-connection");
@@ -41,12 +42,14 @@ public final class LocalCommandServer implements AutoCloseable {
             FrameCapture frameCapture,
             DepthCapture depthCapture,
             MinecraftControl control,
-            MinecraftActions actions
+            MinecraftActions actions,
+            MinecraftChatBridge chatBridge
     ) {
         this.frameCapture = frameCapture;
         this.depthCapture = depthCapture;
         this.control = control;
         this.actions = actions;
+        this.chatBridge = chatBridge;
     }
 
     /** Binds the loopback listener in a daemon thread without delaying client startup. */
@@ -176,6 +179,9 @@ public final class LocalCommandServer implements AutoCloseable {
                     requiredInt(request, "z"),
                     requiredString(request, "item"),
                     requiredLong(request, "count"));
+            case "poll_chat" -> chatBridge.poll(
+                    request.has("limit") ? requiredInt(request, "limit") : 16);
+            case "send_chat" -> chatBridge.send(requiredString(request, "message"));
             default -> CompletableFuture.failedFuture(
                     new IllegalArgumentException("unsupported command: " + command));
         };
