@@ -574,6 +574,26 @@ class MinecraftModClientTest(unittest.TestCase):
         )
         self.assertEqual(payload["objects"][0]["last_seen_unix"], 1_699_999_999.0)
 
+    def test_semantic_whitelist_distinguishes_empty_and_water_cauldrons(self) -> None:
+        """Keep both cauldron block-state registry names visible to Scene."""
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "main"
+            / "java"
+            / "com"
+            / "robonix"
+            / "minecraftmod"
+            / "ObservationFactory.java"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        whitelist = source[
+            source.index("SEMANTIC_BLOCK_WHITELIST"):
+            source.index("DISCOVERED_BLOCKS")
+        ]
+        self.assertIn('"minecraft:cauldron"', whitelist)
+        self.assertIn('"minecraft:water_cauldron"', whitelist)
+
     def test_view_quaternion_is_normalized(self) -> None:
         """Represent yaw and positive-down pitch with the expected ROS axes."""
         quaternion = quaternion_from_yaw_pitch(math.pi / 2.0, 0.25)

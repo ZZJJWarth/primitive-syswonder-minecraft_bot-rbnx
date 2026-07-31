@@ -68,8 +68,9 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
   - Is declared by the colocated `minecraft_mod_perception` primitive so its
     provider namespace matches the perception contract.
   - Publishes the complete set of locally discovered chest, trapped chest,
-    crafting table, and furnace blocks with exact registry names and block
-    centers in the odometry frame.
+    crafting table, furnace, empty cauldron (`minecraft:cauldron`), and water
+    cauldron (`minecraft:water_cauldron`) blocks with exact registry names and
+    block centers in the odometry frame.
   - A block is first added only when visible, remains in later snapshots after
     leaving the area, and is updated or removed when its location is revisited.
 - `robonix/primitive/minecraft/inventory`

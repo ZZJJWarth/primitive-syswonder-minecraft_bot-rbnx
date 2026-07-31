@@ -27,7 +27,9 @@ public final class ObservationFactory {
             "minecraft:chest",
             "minecraft:trapped_chest",
             "minecraft:crafting_table",
-            "minecraft:furnace");
+            "minecraft:furnace",
+            "minecraft:cauldron",
+            "minecraft:water_cauldron");
     private static final Map<String, DiscoveredBlock> DISCOVERED_BLOCKS = new LinkedHashMap<>();
     private static ClientLevel discoveredLevel;
 

@@ -155,7 +155,8 @@ and head height. It is independent of the rendered depth buffer, so side and
 rear obstacles do not require turning the first-person camera.
 
 The provider also publishes exact semantic observations for visible chests,
-trapped chests, crafting tables, and furnaces. Discovery is local and occurs
+trapped chests, crafting tables, furnaces, empty cauldrons, and water
+cauldrons. Discovery is local and occurs
 during exploration rather than preloading the world. Discovered blocks remain
 in the snapshot after the player leaves, while revisiting a changed location
 updates or removes its entry. Scene consumes this stream alongside visual
