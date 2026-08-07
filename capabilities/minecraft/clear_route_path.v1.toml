@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/minecraft/clear_route_path"
+version = "1"
+kind = "primitive"
+idl = "minecraft/srv/ClearRoutePath.srv"
+description = "Clear all recently inspected minecraft:dirt blocks in one bounded route corridor. The primitive consumes a short-lived inspection handle, revalidates every live target and crosshair, clears only dirt, and returns the number cleared. Non-dirt blocks are reported but never changed. Call only after Navigation has stopped on PATH_BLOCKED."
+
+[mode]
+type = "rpc"

@@ -196,6 +196,13 @@ Pilot can also compose the Minecraft state and action capabilities directly:
   accepts an opaque navigation recovery token and returns a 15-second handle;
   clearing consumes that handle and can remove only one live dirt or
   crafting-table block. Minecraft coordinates remain private to the provider.
+- Path-aware recovery is available through `inspect_route_path` and
+  `clear_route_path`. A recovery skill passes path points transformed into
+  `minecraft_odom`, together with the configured footprint half-width and the
+  first body-block height. The Mod samples the swept corridor, checks both
+  body layers, identifies exact `minecraft:dirt` blocks, and clears only those
+  candidates after navigation has stopped. The support layer is never cleared;
+  non-dirt blockers remain for a fresh navigation decision.
 - `robonix/primitive/minecraft/attack_entity` accepts a Scene-selected
   `minecraft:zombie` object ID and resolves it to the live Entity UUID. The Mod
   performs bounded pursuit, gradual aiming, cooldown-aware attacks, and death

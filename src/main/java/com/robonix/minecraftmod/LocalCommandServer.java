@@ -2,6 +2,7 @@
 package com.robonix.minecraftmod;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.BufferedReader;
@@ -177,6 +178,13 @@ public final class LocalCommandServer implements AutoCloseable {
                     requiredBoolean(request, "collect"));
             case "inspect_route_obstacle" -> actions.inspectRouteObstacle(
                     request.has("max_distance") ? request.get("max_distance").getAsDouble() : 4.0);
+            case "inspect_route_path" -> actions.inspectRoutePath(
+                    requiredDoubleArray(request, "navigation_x"),
+                    requiredDoubleArray(request, "navigation_y"),
+                    requiredInt(request, "body_y"),
+                    request.has("half_width") ? request.get("half_width").getAsDouble() : 0.35,
+                    request.has("sample_spacing") ? request.get("sample_spacing").getAsDouble() : 0.25,
+                    request.has("max_blocks") ? requiredInt(request, "max_blocks") : 64);
             case "attack_entity" -> actions.attackEntity(
                     requiredString(request, "entity_uuid"),
                     requiredString(request, "expected_entity"));
@@ -310,6 +318,26 @@ public final class LocalCommandServer implements AutoCloseable {
         } catch (ArithmeticException exception) {
             throw new IllegalArgumentException("field must be an exact integer: " + name, exception);
         }
+    }
+
+    /** Reads a finite JSON number array without accepting strings or nulls. */
+    private static double[] requiredDoubleArray(JsonObject request, String name) {
+        if (!request.has(name) || !request.get(name).isJsonArray()) {
+            throw new IllegalArgumentException("missing number array field: " + name);
+        }
+        JsonArray array = request.getAsJsonArray(name);
+        double[] values = new double[array.size()];
+        for (int index = 0; index < array.size(); index++) {
+            if (!array.get(index).isJsonPrimitive() || !array.get(index).getAsJsonPrimitive().isNumber()) {
+                throw new IllegalArgumentException("array must contain only numbers: " + name);
+            }
+            double value = array.get(index).getAsDouble();
+            if (!Double.isFinite(value)) {
+                throw new IllegalArgumentException("array contains a non-finite number: " + name);
+            }
+            values[index] = value;
+        }
+        return values;
     }
 
     /** Reads a required JSON boolean without accepting strings or numbers. */

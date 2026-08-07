@@ -474,6 +474,58 @@ class MinecraftModClientTest(unittest.TestCase):
                 )
             )
 
+    def test_route_path_retains_only_dirt_targets_behind_handle(self) -> None:
+        """Keep path coordinates private and expose non-dirt blockers as a count."""
+        message = driver.minecraft_mcp.InspectRoutePath_Request(
+            recovery_token="recovery-path",
+            navigation_x=[1.0, 2.0],
+            navigation_y=[-4.0, -4.0],
+            body_y=64,
+            half_width_m=0.35,
+            sample_spacing_m=0.25,
+            max_blocks=16,
+        )
+        inspected = {
+            "found": True,
+            "dirt_count": 2,
+            "other_count": 1,
+            "dirt_blocks": [
+                {"block_name": "minecraft:dirt", "x": 1, "y": 64, "z": 4},
+                {"block_name": "minecraft:dirt", "x": 2, "y": 65, "z": 4},
+            ],
+            "other_blocks": [
+                {"block_name": "minecraft:stone", "x": 1, "y": 64, "z": 5},
+            ],
+        }
+        with patch.object(driver.client, "request", return_value=inspected) as request:
+            inspection = driver.inspect_route_path_mcp(message)
+        self.assertTrue(inspection.found)
+        self.assertEqual(inspection.dirt_count, 2)
+        self.assertEqual(inspection.other_count, 1)
+        self.assertNotIn("1,64,4", inspection.detail)
+        sent = request.call_args.args[0]
+        self.assertEqual(sent["cmd"], "inspect_route_path")
+        self.assertEqual(sent["navigation_x"], [1.0, 2.0])
+
+        clear = driver.minecraft_mcp.ClearRoutePath_Request(
+            inspection_handle=inspection.inspection_handle,
+            max_blocks=16,
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            side_effect=[
+                {"aimed": True, "actual_block": "minecraft:dirt"},
+                {"block_broken": True, "original_block": "minecraft:dirt"},
+                {"aimed": True, "actual_block": "minecraft:dirt"},
+                {"block_broken": True, "original_block": "minecraft:dirt"},
+            ],
+        ):
+            cleared = driver.clear_route_path_mcp(clear)
+        self.assertTrue(cleared.cleared)
+        self.assertEqual(cleared.cleared_count, 2)
+        self.assertEqual(cleared.other_count, 1)
+
     def test_aim_at_block_resolves_stable_object_id_and_verifies_live_hit(self) -> None:
         """Resolve the selected Scene object ID without VLM coordinate arithmetic."""
         message = driver.minecraft_mcp.AimAtBlockV2_Request(

@@ -85,7 +85,18 @@ class RouteObstacle:
     expires_monotonic: float
 
 
+@dataclass(frozen=True)
+class RoutePathInspection:
+    """Native dirt targets retained behind one short-lived path handle."""
+
+    dirt_positions: tuple[tuple[int, int, int], ...]
+    other_count: int
+    recovery_token: str
+    expires_monotonic: float
+
+
 route_obstacles: dict[str, RouteObstacle] = {}
+route_path_inspections: dict[str, RoutePathInspection] = {}
 latest_cmd_vel: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 previous_odom_sample: tuple[float, float, float, float] | None = None
 camera_stream_hz = 5.0
@@ -1195,6 +1206,13 @@ def _prune_route_obstacles(now: float) -> None:
     ]
     for handle in expired:
         route_obstacles.pop(handle, None)
+    expired_paths = [
+        handle
+        for handle, inspection in route_path_inspections.items()
+        if inspection.expires_monotonic <= now
+    ]
+    for handle in expired_paths:
+        route_path_inspections.pop(handle, None)
 
 
 @minecraft_actions.mcp("robonix/primitive/minecraft/inspect_route_obstacle")
@@ -1249,6 +1267,130 @@ def inspect_route_obstacle_mcp(
             "one allowlisted route obstacle can be cleared"
             if clearable
             else "the route obstacle is not on the clear allowlist"
+        ),
+    )
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/inspect_route_path")
+def inspect_route_path_mcp(
+    req: minecraft_mcp.InspectRoutePath_Request,
+) -> minecraft_mcp.InspectRoutePath_Response:
+    """Inspect a footprint-width minecraft_odom path without mutating blocks."""
+    recovery_token = str(req.recovery_token or "").strip()
+    if not recovery_token or len(recovery_token) > 128:
+        raise ValueError("recovery_token must contain from 1 through 128 characters")
+    navigation_x = [float(value) for value in req.navigation_x]
+    navigation_y = [float(value) for value in req.navigation_y]
+    if not 1 <= len(navigation_x) <= 256 or len(navigation_x) != len(navigation_y):
+        raise ValueError("path must contain from 1 through 256 paired points")
+    if not all(math.isfinite(value) for value in navigation_x + navigation_y):
+        raise ValueError("path coordinates must be finite")
+    body_y = exact_int(int(req.body_y), "body_y", -2048, 2048)
+    half_width = float(req.half_width_m)
+    sample_spacing = float(req.sample_spacing_m)
+    max_blocks = exact_int(int(req.max_blocks), "max_blocks", 1, 256)
+    if not math.isfinite(half_width) or not 0.30 <= half_width <= 1.5:
+        raise ValueError("half_width_m must be from 0.30 through 1.5")
+    if not math.isfinite(sample_spacing) or not 0.1 <= sample_spacing <= 1.0:
+        raise ValueError("sample_spacing_m must be from 0.1 through 1.0")
+    result = action_request({
+        "cmd": "inspect_route_path",
+        "navigation_x": navigation_x,
+        "navigation_y": navigation_y,
+        "body_y": body_y,
+        "half_width": half_width,
+        "sample_spacing": sample_spacing,
+        "max_blocks": max_blocks,
+    })
+    dirt_blocks = result.get("dirt_blocks")
+    other_count = exact_int(result.get("other_count"), "other_count", 0, max_blocks)
+    if not isinstance(dirt_blocks, list):
+        raise RuntimeError("Minecraft Mod returned invalid dirt_blocks")
+    dirt_positions: list[tuple[int, int, int]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for raw in dirt_blocks:
+        if not isinstance(raw, dict) or registry_name(raw.get("block_name"), "block_name") != "minecraft:dirt":
+            raise RuntimeError("Minecraft Mod returned a non-dirt route candidate")
+        position = (
+            exact_int(raw.get("x"), "x", -30_000_000, 30_000_000),
+            exact_int(raw.get("y"), "y", -2048, 2048),
+            exact_int(raw.get("z"), "z", -30_000_000, 30_000_000),
+        )
+        if position not in seen:
+            seen.add(position)
+            dirt_positions.append(position)
+    if len(dirt_positions) > max_blocks:
+        raise RuntimeError("Minecraft Mod returned too many dirt route candidates")
+    found = result.get("found")
+    if not isinstance(found, bool):
+        raise RuntimeError("Minecraft Mod returned invalid route inspection presence")
+    handle = str(uuid.uuid4()) if found else ""
+    if handle:
+        now = time.monotonic()
+        with route_obstacles_lock:
+            _prune_route_obstacles(now)
+            route_path_inspections[handle] = RoutePathInspection(
+                dirt_positions=tuple(dirt_positions),
+                other_count=other_count,
+                recovery_token=recovery_token,
+                expires_monotonic=now + ROUTE_OBSTACLE_HANDLE_TTL_SEC,
+            )
+    return minecraft_mcp.InspectRoutePath_Response(
+        found=found,
+        inspection_handle=handle,
+        dirt_count=len(dirt_positions),
+        other_count=other_count,
+        detail=(
+            f"found {len(dirt_positions)} dirt blocks in the footprint corridor"
+            if dirt_positions else "no dirt block occupies the footprint corridor"
+        ),
+    )
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/clear_route_path")
+def clear_route_path_mcp(
+    req: minecraft_mcp.ClearRoutePath_Request,
+) -> minecraft_mcp.ClearRoutePath_Response:
+    """Consume one path handle and clear only its revalidated dirt targets."""
+    handle = str(req.inspection_handle or "").strip()
+    if not handle:
+        raise ValueError("inspection_handle must be non-empty")
+    max_blocks = exact_int(int(req.max_blocks), "max_blocks", 1, 256)
+    now = time.monotonic()
+    with route_obstacles_lock:
+        _prune_route_obstacles(now)
+        inspection = route_path_inspections.pop(handle, None)
+    if inspection is None:
+        raise ValueError("unknown or expired inspection_handle; inspect the route again")
+    if len(inspection.dirt_positions) > max_blocks:
+        raise ValueError("inspection contains more blocks than max_blocks")
+    cleared = 0
+    for x, y, z in inspection.dirt_positions:
+        aimed = action_request({
+            "cmd": "aim_at_block",
+            "x": x,
+            "y": y,
+            "z": z,
+            "expected_block": "minecraft:dirt",
+        })
+        if aimed.get("aimed") is not True or aimed.get("actual_block") != "minecraft:dirt":
+            raise RuntimeError(f"route dirt target changed before clearing at {x},{y},{z}")
+        broken = action_request({
+            "cmd": "break_block",
+            "expected_block": "minecraft:dirt",
+            "collect": False,
+        })
+        if broken.get("block_broken") is not True or broken.get("original_block") != "minecraft:dirt":
+            raise RuntimeError(f"Minecraft Mod did not verify route dirt destruction at {x},{y},{z}")
+        cleared += 1
+    return minecraft_mcp.ClearRoutePath_Response(
+        cleared=cleared == len(inspection.dirt_positions),
+        cleared_count=cleared,
+        remaining_count=len(inspection.dirt_positions) - cleared,
+        other_count=inspection.other_count,
+        detail=(
+            f"cleared {cleared} verified dirt blocks; "
+            f"{inspection.other_count} non-dirt obstacles remain unchanged"
         ),
     )
 

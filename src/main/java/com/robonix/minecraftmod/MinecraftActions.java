@@ -4,6 +4,8 @@ package com.robonix.minecraftmod;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.util.Set;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
@@ -271,6 +273,107 @@ public final class MinecraftActions implements AutoCloseable {
             response.addProperty("found", false);
             return response;
         });
+    }
+
+    /** Inspects a bounded minecraft_odom path corridor without changing the world. */
+    public CompletableFuture<JsonObject> inspectRoutePath(
+            double[] navigationX,
+            double[] navigationY,
+            int bodyY,
+            double halfWidth,
+            double sampleSpacing,
+            int maxBlocks
+    ) {
+        return onClientThread(() -> {
+            requireNoActiveAction();
+            if (navigationX == null || navigationY == null
+                    || navigationX.length == 0 || navigationX.length != navigationY.length
+                    || navigationX.length > 256) {
+                throw new IllegalArgumentException("path must contain from 1 through 256 paired points");
+            }
+            if (!Double.isFinite(halfWidth) || halfWidth < 0.30 || halfWidth > 1.5) {
+                throw new IllegalArgumentException("half_width must be from 0.30 through 1.5");
+            }
+            if (!Double.isFinite(sampleSpacing) || sampleSpacing < 0.1 || sampleSpacing > 1.0) {
+                throw new IllegalArgumentException("sample_spacing must be from 0.1 through 1.0");
+            }
+            if (maxBlocks < 1 || maxBlocks > 256) {
+                throw new IllegalArgumentException("max_blocks must be from 1 through 256");
+            }
+            for (int index = 0; index < navigationX.length; index++) {
+                if (!Double.isFinite(navigationX[index]) || !Double.isFinite(navigationY[index])) {
+                    throw new IllegalArgumentException("path coordinates must be finite");
+                }
+            }
+            Minecraft minecraft = Minecraft.getInstance();
+            LocalPlayer player = requirePlayer(minecraft);
+            Map<BlockPos, String> dirt = new LinkedHashMap<>();
+            Map<BlockPos, String> other = new LinkedHashMap<>();
+            for (int index = 0; index < navigationX.length; index++) {
+                double startX = navigationX[index];
+                double startZ = -navigationY[index];
+                double endX = index + 1 < navigationX.length ? navigationX[index + 1] : startX;
+                double endZ = index + 1 < navigationX.length ? -navigationY[index + 1] : startZ;
+                double length = Math.hypot(endX - startX, endZ - startZ);
+                int steps = Math.max(1, (int) Math.ceil(length / sampleSpacing));
+                for (int step = 0; step <= steps; step++) {
+                    double ratio = (double) step / steps;
+                    double sampleX = startX + (endX - startX) * ratio;
+                    double sampleZ = startZ + (endZ - startZ) * ratio;
+                    int minX = (int) Math.floor(sampleX - halfWidth);
+                    int maxX = (int) Math.floor(sampleX + halfWidth);
+                    int minZ = (int) Math.floor(sampleZ - halfWidth);
+                    int maxZ = (int) Math.floor(sampleZ + halfWidth);
+                    for (int x = minX; x <= maxX; x++) {
+                        for (int z = minZ; z <= maxZ; z++) {
+                            for (int y = bodyY; y <= bodyY + 1; y++) {
+                                BlockPos position = new BlockPos(x, y, z);
+                                BlockState state = minecraft.level.getBlockState(position);
+                                if (state.isAir()
+                                        || state.getCollisionShape(minecraft.level, position).isEmpty()) {
+                                    continue;
+                                }
+                                String name = blockName(state);
+                                if (state.is(Blocks.DIRT)) {
+                                    dirt.putIfAbsent(position, name);
+                                } else {
+                                    other.putIfAbsent(position, name);
+                                }
+                                if (dirt.size() + other.size() > maxBlocks) {
+                                    throw new IllegalStateException(
+                                            "route corridor contains more than max_blocks obstacles");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            JsonObject response = new JsonObject();
+            response.addProperty("found", !dirt.isEmpty() || !other.isEmpty());
+            response.addProperty("dirt_count", dirt.size());
+            response.addProperty("other_count", other.size());
+            response.add("dirt_blocks", blockArray(dirt));
+            response.add("other_blocks", blockArray(other));
+            response.addProperty("body_y", bodyY);
+            response.addProperty("player_x", player.getX());
+            response.addProperty("player_z", player.getZ());
+            return response;
+        });
+    }
+
+    /** Encodes inspected native block identities while keeping coordinates local to the Mod. */
+    private static JsonArray blockArray(Map<BlockPos, String> blocks) {
+        JsonArray result = new JsonArray();
+        for (Map.Entry<BlockPos, String> entry : blocks.entrySet()) {
+            BlockPos position = entry.getKey();
+            JsonObject block = new JsonObject();
+            block.addProperty("block_name", entry.getValue());
+            block.addProperty("x", position.getX());
+            block.addProperty("y", position.getY());
+            block.addProperty("z", position.getZ());
+            result.add(block);
+        }
+        return result;
     }
 
     /** Begins bounded pursuit and cooldown-aware attacks against one live zombie UUID. */

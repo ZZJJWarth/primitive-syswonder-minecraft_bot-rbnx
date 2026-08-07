@@ -125,10 +125,25 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     `minecraft:crafting_table` are clearable; every other block is reported but
     rejected. One call can destroy at most one block.
   - After a verified clear, synchronize Navigation perception and reassess the
-    original goal. If the refreshed assessment still reports `NO_ROUTE`,
-    inspect again with the same recovery token to obtain the next handle.
-    Stop as soon as a route exists and clear no more than three blocks per
-    recovery attempt.
+    original goal. If the refreshed planner still reports a blockage, inspect
+    again with the same recovery token to obtain the next handle.
+- `robonix/primitive/minecraft/inspect_route_path`
+  - Accepts a bounded sequence of planar points already transformed into
+    `minecraft_odom`, the first body-block `body_y`, and the robot footprint
+    half-width plus padding. The Mod samples the path, checks the two body
+    layers across the full width, and returns an opaque handle for the exact
+    dirt candidates plus a count of non-clearable collision blocks.
+  - It never checks or clears the support block below `body_y`. Navigation
+    frame points must be transformed explicitly; `map` coordinates and raw
+    Scene coordinates are rejected by the caller before this primitive.
+- `robonix/primitive/minecraft/clear_route_path`
+  - Consumes one short-lived path inspection handle and sequentially
+    revalidates, aims at, and breaks every inspected `minecraft:dirt` target.
+    Non-dirt blocks are reported and never changed. The handle is consumed even
+    when a target changes, so callers must inspect a fresh path after any
+    partial or failed clear.
+  - Stop as soon as a route exists and clear no more than the caller's bounded
+    `max_blocks` per recovery attempt.
 - `robonix/primitive/minecraft/attack_entity`
   - Resolves one Scene-selected `minecraft:zombie` ID to its native Entity UUID
     and owns the local combat loop. It tracks the moving target, approaches

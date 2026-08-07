@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/minecraft/inspect_route_path"
+version = "1"
+kind = "primitive"
+idl = "minecraft/srv/InspectRoutePath.srv"
+description = "Inspect a bounded Navigation path corridor in minecraft_odom. navigation_x/y are transformed path points, body_y is the first body block, and half_width_m must match the robot footprint plus padding. The Mod reports exact dirt and non-clearable collision blocks without changing the world. Preserve the recovery token from PATH_BLOCKED and never include the support block below body_y."
+
+[mode]
+type = "rpc"
