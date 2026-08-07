@@ -35,12 +35,8 @@ capabilities:
     path: capabilities/minecraft/aim_at_block.v2.toml
   - name: robonix/primitive/minecraft/break_block
     path: capabilities/minecraft/break_block.v1.toml
-  - name: robonix/primitive/minecraft/inspect_route_obstacle
-    path: capabilities/minecraft/inspect_route_obstacle.v1.toml
   - name: robonix/primitive/minecraft/inspect_route_path
     path: capabilities/minecraft/inspect_route_path.v1.toml
-  - name: robonix/primitive/minecraft/clear_route_obstacle
-    path: capabilities/minecraft/clear_route_obstacle.v1.toml
   - name: robonix/primitive/minecraft/clear_route_path
     path: capabilities/minecraft/clear_route_path.v1.toml
   - name: robonix/primitive/minecraft/attack_entity

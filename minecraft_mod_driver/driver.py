@@ -1219,7 +1219,6 @@ def _prune_route_obstacles(now: float) -> None:
         route_path_inspections.pop(handle, None)
 
 
-@minecraft_actions.mcp("robonix/primitive/minecraft/inspect_route_obstacle")
 def inspect_route_obstacle_mcp(
     req: minecraft_mcp.InspectRouteObstacle_Request,
 ) -> minecraft_mcp.InspectRouteObstacle_Response:
@@ -1399,7 +1398,6 @@ def clear_route_path_mcp(
     )
 
 
-@minecraft_actions.mcp("robonix/primitive/minecraft/clear_route_obstacle")
 def clear_route_obstacle_mcp(
     req: minecraft_mcp.ClearRouteObstacle_Request,
 ) -> minecraft_mcp.ClearRouteObstacle_Response:

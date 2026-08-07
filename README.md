@@ -192,12 +192,10 @@ Pilot can also compose the Minecraft state and action capabilities directly:
   `minecraft:crafting_table`, and can wait for matching synchronized pickup
   verification. It stops attacking and walks toward the former block centre
   when collection is requested. Aim at the intended block before calling it.
-- Route-obstacle recovery has a planner-path pair and a compatibility fallback.
-  When PATH_BLOCKED contains a transformed planner path, use
-  `inspect_route_path` followed by `clear_route_path`; the fallback inspection
-  accepts an opaque navigation recovery token and returns a 90-second handle;
-  clearing consumes that handle and can remove only one live dirt or
-  crafting-table block. Minecraft coordinates remain private to the provider.
+- Route-obstacle recovery uses `inspect_route_path` followed by
+  `clear_route_path`; the bounded path inspection retains an opaque
+  90-second handle and clearing can remove every verified dirt candidate in
+  the corridor. Minecraft coordinates remain private to the provider.
 - Path-aware recovery is available through `inspect_route_path` and
   `clear_route_path`. A recovery skill passes path points transformed into
   `minecraft_odom`, together with the configured footprint half-width and the

@@ -113,20 +113,6 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     When collection is requested, the Bot stops attacking, walks toward the
     former block centre, and waits for the matching synchronized inventory
     count to increase.
-- `robonix/primitive/minecraft/inspect_route_obstacle`
-  - Compatibility fallback only when `PATH_BLOCKED` has no transformed
-    planner path. If the event contains a `minecraft_odom` planner path, use
-    `inspect_route_path` instead; it checks the complete footprint corridor.
-    This fallback returns an opaque 90-second handle without publishing native
-    Minecraft coordinates.
-- `robonix/primitive/minecraft/clear_route_obstacle`
-  - Consumes one obstacle handle and revalidates its age, exact live block,
-    visibility, and reach. Only `minecraft:dirt` and
-    `minecraft:crafting_table` are clearable; every other block is reported but
-    rejected. One call can destroy at most one block.
-  - After a verified clear, synchronize Navigation perception and reassess the
-    original goal. If the refreshed planner still reports a blockage, inspect
-    again with the same recovery token to obtain the next handle.
 - `robonix/primitive/minecraft/inspect_route_path`
   - Accepts a bounded sequence of planar points already transformed into
     `minecraft_odom`, the first body-block `body_y`, and the robot footprint
