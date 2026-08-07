@@ -14,6 +14,8 @@ import net.minecraft.client.multiplayer.PlayerInfo;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.state.BlockState;
@@ -30,6 +32,8 @@ public final class ObservationFactory {
             "minecraft:furnace",
             "minecraft:cauldron",
             "minecraft:water_cauldron");
+    private static final Set<String> SEMANTIC_ENTITY_WHITELIST = Set.of(
+            "minecraft:zombie");
     private static final Map<String, DiscoveredBlock> DISCOVERED_BLOCKS = new LinkedHashMap<>();
     private static ClientLevel discoveredLevel;
 
@@ -59,7 +63,7 @@ public final class ObservationFactory {
         observation.addProperty("pitch", round(Math.toRadians(player.getXRot())));
         observation.addProperty("onGround", player.onGround());
         observation.add("held", held(level, player.getMainHandItem()));
-        observation.add("nearbyEntities", new JsonArray());
+        observation.add("nearbyEntities", nearbyEntities(level, player, capturedAt));
         observation.add("nearbyBlocks", nearbyBlocks(level, player.blockPosition()));
         observation.add("semanticBlocks", semanticBlocks(level, player, capturedAt));
         return observation;
@@ -111,6 +115,45 @@ public final class ObservationFactory {
         BlockHitResult hit = level.clip(new ClipContext(
                 player.getEyePosition(), target, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
         return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(position);
+    }
+
+    /** Returns visible live semantic entities with stable UUID identity and geometry. */
+    private static JsonArray nearbyEntities(
+            ClientLevel level,
+            LocalPlayer player,
+            Instant capturedAt
+    ) {
+        double radius = envInt("RBNX_MINECRAFT_ENTITY_RADIUS", 16);
+        double radiusSquared = radius * radius;
+        String dimension = level.dimension().location().toString();
+        JsonArray entities = new JsonArray();
+        for (Entity entity : level.entitiesForRendering()) {
+            if (!(entity instanceof LivingEntity living)
+                    || entity == player
+                    || !living.isAlive()
+                    || player.distanceToSqr(entity) > radiusSquared) {
+                continue;
+            }
+            String name = level.registryAccess().registryOrThrow(Registries.ENTITY_TYPE)
+                    .getKey(entity.getType()).toString();
+            if (!SEMANTIC_ENTITY_WHITELIST.contains(name) || !player.hasLineOfSight(entity)) {
+                continue;
+            }
+            Vec3 center = entity.getBoundingBox().getCenter();
+            JsonObject entry = new JsonObject();
+            entry.addProperty("id", "entity:" + dimension + "@" + entity.getUUID());
+            entry.addProperty("uuid", entity.getUUID().toString());
+            entry.addProperty("name", name);
+            entry.add("position", position(center.x, center.y, center.z));
+            entry.addProperty("yaw", round(observationYaw(entity.getYRot())));
+            entry.addProperty("width", round(entity.getBoundingBox().getXsize()));
+            entry.addProperty("height", round(entity.getBoundingBox().getYsize()));
+            entry.addProperty("depth", round(entity.getBoundingBox().getZsize()));
+            entry.addProperty("health", round(living.getHealth()));
+            entry.addProperty("lastSeen", capturedAt.toString());
+            entities.add(entry);
+        }
+        return entities;
     }
 
     /** Builds a stable identifier from the dimension and integer block coordinates. */

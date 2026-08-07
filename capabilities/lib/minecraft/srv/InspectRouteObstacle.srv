@@ -1,0 +1,10 @@
+# Inspect the first collidable block in the bot's short forward corridor.
+# recovery_token is opaque correlation data from a navigation recovery event.
+string recovery_token  # opaque 1..128 character token copied from the PATH_BLOCKED event
+float64 max_distance_m  # allowed range 0.5..4.5 metres; use 4.5 to inspect the full short corridor
+---
+bool found
+string obstacle_handle
+string block_name
+bool clearable
+string detail

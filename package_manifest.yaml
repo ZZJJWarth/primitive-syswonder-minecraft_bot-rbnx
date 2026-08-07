@@ -23,16 +23,27 @@ capabilities:
   - name: robonix/primitive/lidar/lidar
   - name: robonix/primitive/chassis/move
   - name: robonix/primitive/chassis/odom
-  - name: robonix/primitive/chassis/driver
   - name: robonix/primitive/perception/objects
     path: capabilities/perception/objects.v1.toml
   - name: robonix/primitive/minecraft/inventory
     path: capabilities/minecraft/inventory.v1.toml
+  - name: robonix/primitive/minecraft/select_inventory_item
+    path: capabilities/minecraft/select_inventory_item.v1.toml
   - name: robonix/primitive/minecraft/get_state
     path: capabilities/minecraft/get_state.v1.toml
   - name: robonix/primitive/minecraft/aim_at_block
-    path: capabilities/minecraft/aim_at_block.v1.toml
+    path: capabilities/minecraft/aim_at_block.v2.toml
   - name: robonix/primitive/minecraft/break_block
     path: capabilities/minecraft/break_block.v1.toml
+  - name: robonix/primitive/minecraft/inspect_route_obstacle
+    path: capabilities/minecraft/inspect_route_obstacle.v1.toml
+  - name: robonix/primitive/minecraft/clear_route_obstacle
+    path: capabilities/minecraft/clear_route_obstacle.v1.toml
+  - name: robonix/primitive/minecraft/attack_entity
+    path: capabilities/minecraft/attack_entity.v1.toml
   - name: robonix/primitive/minecraft/deposit_item
-    path: capabilities/minecraft/deposit_item.v1.toml
+    path: capabilities/minecraft/deposit_item.v2.toml
+  - name: robonix/primitive/minecraft/withdraw_item
+    path: capabilities/minecraft/withdraw_item.v2.toml
+  - name: robonix/primitive/minecraft/fill_water_bottles
+    path: capabilities/minecraft/fill_water_bottles.v2.toml

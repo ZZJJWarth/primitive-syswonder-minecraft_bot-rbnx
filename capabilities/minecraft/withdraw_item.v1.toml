@@ -1,0 +1,10 @@
+# Withdraw an exact quantity of one item from a reachable chest and verify synchronization.
+[contract]
+id      = "robonix/primitive/minecraft/withdraw_item"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/WithdrawItem.srv"
+description = "Compatibility interface for withdrawing from an explicit native Minecraft BlockPos. x/y/z must come from a native Minecraft source and must never be derived from Scene coordinates or goal_near. New Scene-driven callers must use v2 with a stable object_id. item is an exact registry name such as minecraft:bread or minecraft:potion; minecraft:water_bottle is not registered. Availability, capacity, crosshair, and count failures are explicit and non-mutating."
+
+[mode]
+type = "rpc"

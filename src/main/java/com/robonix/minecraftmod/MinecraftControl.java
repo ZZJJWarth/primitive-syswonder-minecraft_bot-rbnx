@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
@@ -18,6 +19,12 @@ public final class MinecraftControl {
     private ActiveMove activeMove;
     private ActiveVelocity activeVelocity;
     private boolean respawnRequested;
+    private BooleanSupplier actionActive = () -> false;
+
+    /** Installs the colocated action-state guard used by new motion commands. */
+    void setActionActive(BooleanSupplier value) {
+        actionActive = value;
+    }
 
     /** Starts one movement command on the client thread and completes after its duration. */
     public CompletableFuture<JsonObject> move(String direction, long durationMs) {
@@ -56,6 +63,7 @@ public final class MinecraftControl {
         minecraft.execute(() -> {
             try {
                 LocalPlayer player = requirePlayer(minecraft);
+                requireNoActionMotion();
                 validateViewRotation(yawDegrees, pitchDegrees);
                 finishActive(new IllegalStateException("movement replaced by a newer command"));
                 finishVelocity(new IllegalStateException("movement replaced by a newer command"));
@@ -104,10 +112,10 @@ public final class MinecraftControl {
         return result;
     }
 
-    /** Releases all active movement immediately before an item action starts. */
+    /** Releases all active movement immediately before a Minecraft action starts. */
     void stopForAction() {
-        finishActive(new IllegalStateException("movement stopped by an item action"));
-        finishVelocity(new IllegalStateException("movement stopped by an item action"));
+        finishActive(new IllegalStateException("movement stopped by a Minecraft action"));
+        finishVelocity(new IllegalStateException("movement stopped by a Minecraft action"));
     }
 
     /** Completes a bounded movement when its deadline passes at client tick end. */
@@ -180,6 +188,7 @@ public final class MinecraftControl {
             long durationMs,
             CompletableFuture<JsonObject> result
     ) {
+        requireNoActionMotion();
         if (!Double.isFinite(linearX) || !Double.isFinite(linearY)
                 || !Double.isFinite(yawDegrees) || !Double.isFinite(pitchDegrees)) {
             throw new IllegalArgumentException("movement and view values must be finite");
@@ -216,6 +225,7 @@ public final class MinecraftControl {
             CompletableFuture<JsonObject> result
     ) {
         Minecraft minecraft = Minecraft.getInstance();
+        requireNoActionMotion();
         LocalPlayer player = requirePlayer(minecraft);
         KeyMapping key = keyFor(minecraft, direction);
         finishActive(new IllegalStateException("movement replaced by a newer command"));
@@ -224,6 +234,13 @@ public final class MinecraftControl {
         activeMove = new ActiveMove(
                 key, untilNanos, player.getX(), player.getZ(), targetDistance, result);
         key.setDown(true);
+    }
+
+    /** Prevents Nav2 or manual commands from racing a native Minecraft action. */
+    private void requireNoActionMotion() {
+        if (actionActive.getAsBoolean()) {
+            throw new IllegalStateException("movement is unavailable while a Minecraft action is active");
+        }
     }
 
     /** Releases the active key and resolves its result with the latest observation. */

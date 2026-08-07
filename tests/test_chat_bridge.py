@@ -135,6 +135,20 @@ class ChatFormattingTests(unittest.TestCase):
         )
         self.assertEqual(progress_message(event), ("正在执行：探索附近区域", False))
 
+    def test_warning_async_event_bypasses_progress_throttle(self) -> None:
+        event = pilot_pb2.PilotEvent(
+            event_kind=EVT_NODE_STATE,
+            node_state=pilot_pb2.RtdlNodeState(
+                state=NODE_RUNNING,
+                description="在房间 room-a 发现僵尸 zombie-1",
+                operator_detail="warning:ZOMBIE_DETECTED",
+            ),
+        )
+        self.assertEqual(
+            progress_message(event),
+            ("正在执行：在房间 room-a 发现僵尸 zombie-1", True),
+        )
+
     def test_failed_node_is_urgent(self) -> None:
         event = pilot_pb2.PilotEvent(
             event_kind=EVT_NODE_STATE,

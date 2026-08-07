@@ -1,0 +1,10 @@
+# Fill an exact number of glass bottles from one reachable water cauldron.
+[contract]
+id      = "robonix/primitive/minecraft/fill_water_bottles"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/FillWaterBottles.srv"
+description = "Compatibility interface for filling bottles from an explicit native Minecraft BlockPos. x/y/z must come from a native Minecraft source and must never be derived from Scene coordinates or goal_near. New Scene-driven callers must use v2 with a stable object_id. The operation validates water level, bottle count, and capacity before interaction and verifies every resulting delta."
+
+[mode]
+type = "rpc"

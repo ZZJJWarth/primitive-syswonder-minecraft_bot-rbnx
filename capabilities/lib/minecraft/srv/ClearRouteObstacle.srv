@@ -1,0 +1,6 @@
+# Clear one previously inspected route obstacle through a short-lived handle.
+string obstacle_handle
+---
+bool cleared
+string block_name
+string detail

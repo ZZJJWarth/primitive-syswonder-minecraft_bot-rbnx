@@ -62,21 +62,34 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     planar ROS Twist commands from generic Navigation. It executes only short
     latest-command chunks and explicitly stops when commands become stale,
     during deactivation, or during shutdown.
-- `robonix/primitive/chassis/driver`
-  - Shares the same Forge client connection as the camera primitive.
+  - Shares the aggregate `minecraft_mod` provider and Forge client connection
+    with the camera, lidar, perception, and Minecraft action capabilities.
 - `robonix/primitive/perception/objects`
-  - Is declared by the colocated `minecraft_mod_perception` primitive so its
-    provider namespace matches the perception contract.
+  - Is declared by the aggregate `minecraft_mod` provider.
   - Publishes the complete set of locally discovered chest, trapped chest,
     crafting table, furnace, empty cauldron (`minecraft:cauldron`), and water
     cauldron (`minecraft:water_cauldron`) blocks with exact registry names and
-    block centers in the odometry frame.
+    block centers and one-block geometry in the odometry frame. Each globally
+    stable object ID is also retained in the primitive's native BlockPos map.
+  - Also publishes visible live `minecraft:zombie` entities with stable UUID
+    identity, moving centre pose, and live bounding-box geometry. Transient
+    entities disappear from the complete snapshot when dead, out of range, or
+    no longer visible.
   - A block is first added only when visible, remains in later snapshots after
     leaving the area, and is updated or removed when its location is revisited.
 - `robonix/primitive/minecraft/inventory`
   - Returns all 36 main inventory slots plus offhand slot 40 using exact item
     registry names. Slots 0-8 are the hotbar, and empty slots report
     `minecraft:air` with count zero.
+- `robonix/primitive/minecraft/select_inventory_item`
+  - Selects the largest stack matching one exact registry name into the main
+    hand. A stack already in slots 0-8 is selected directly; a stack in slots
+    9-35 is swapped into the current hotbar slot with the native pick-item
+    operation. Success is returned only after the main hand is stable for
+    three client ticks.
+  - `minecraft:glass_bottle` selects an empty bottle. If the name is invalid or
+    absent, the capability returns a distinct registered-name or inventory
+    error without pretending that selection succeeded.
 - `robonix/primitive/minecraft/get_state`
   - Returns a fresh timestamped snapshot of the player's Minecraft-world
     position, block position, view angles, dimension, grounded state, health,
@@ -87,10 +100,9 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     targets must go through `navigation/navigate_world`; do not relabel their
     coordinates by merely changing or clearing a `PoseStamped` frame.
 - `robonix/primitive/minecraft/aim_at_block`
-  - Accepts the exact `minecraft_odom` block-centre coordinate returned by
-    Scene and an expected registry name, converts it to a native Minecraft
-    block position internally, then gradually turns the first-person view at
-    bounded yaw and pitch rates. Robot and `scene/goal_near` poses are rejected.
+  - Accepts a stable object ID returned by Scene and an expected registry
+    name. The primitive resolves the ID to its own native BlockPos. Unknown or
+    stale IDs are rejected and require a fresh `scene/list_objects` query.
   - Succeeds only after the live Minecraft crosshair hits that visible,
     interaction-reachable block for three consecutive client ticks. It does
     not attack, use, place, or otherwise change the target block.
@@ -101,30 +113,96 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     When collection is requested, the Bot stops attacking, walks toward the
     former block centre, and waits for the matching synchronized inventory
     count to increase.
+- `robonix/primitive/minecraft/inspect_route_obstacle`
+  - Use only after navigation emits `PATH_BLOCKED` and has stopped. It inspects
+    a bounded forward corridor and returns an opaque 15-second handle without
+    publishing native Minecraft coordinates.
+  - This is the first Minecraft recovery call after `PATH_BLOCKED`; do not
+    assess, synchronize, or start Explore before inspecting the obstruction.
+- `robonix/primitive/minecraft/clear_route_obstacle`
+  - Consumes one obstacle handle and revalidates its age, exact live block,
+    visibility, and reach. Only `minecraft:dirt` and
+    `minecraft:crafting_table` are clearable; every other block is reported but
+    rejected. One call can destroy at most one block.
+  - After a verified clear, synchronize Navigation perception and reassess the
+    original goal. If the refreshed assessment still reports `NO_ROUTE`,
+    inspect again with the same recovery token to obtain the next handle.
+    Stop as soon as a route exists and clear no more than three blocks per
+    recovery attempt.
+- `robonix/primitive/minecraft/attack_entity`
+  - Resolves one Scene-selected `minecraft:zombie` ID to its native Entity UUID
+    and owns the local combat loop. It tracks the moving target, approaches
+    within normal reach, waits for attack cooldown, uses the normal client
+    attack interaction, and returns only after observing target death.
+  - Combat aborts below four health points, after 25 seconds or 30 attack
+    attempts, when either chase bound is exceeded, or when the UUID disappears
+    before death is confirmed. Cleanup always restores forward input.
+  - Players, villagers, pets, skeletons, and every other non-whitelisted entity
+    type are rejected before any attack.
 - `robonix/primitive/minecraft/deposit_item`
-  - Deposits exactly one main-inventory `minecraft:dirt` or
-    `minecraft:crafting_table` into an explicit, visible, reachable chest or
-    trapped chest through normal menu clicks. Success requires the player count
-    to fall by one and the container count to rise by one.
-  - Its integer `x/y/z` fields are a native Minecraft `BlockPos`, not Scene
-    `minecraft_odom` coordinates and not a `scene/goal_near` approach pose. For
-    an exact Scene centre `(scene_x, scene_y, scene_z)`, convert only with
-    `x=floor(scene_x)`, `y=floor(scene_z)`, `z=floor(-scene_y)`. For example,
-    Scene `(47.5, 18.5, 5.5)` is Minecraft `(47, 5, -19)`.
+  - Deposits an exact positive quantity of any registered item into an explicit,
+    visible, reachable chest or trapped chest through normal menu clicks. It
+    fails before mutation when the item ID is not registered, the main inventory
+    has too few items, or the chest lacks capacity. Success requires matching
+    player and container count changes.
+- `robonix/primitive/minecraft/withdraw_item`
+  - Withdraws an exact positive quantity of any registered item from an
+    explicit, visible, reachable chest or trapped chest. It fails before
+    mutation when the item is absent, the available quantity is insufficient,
+    or the player's main inventory lacks capacity. Success requires matching
+    player and container count changes.
+- `robonix/primitive/minecraft/fill_water_bottles`
+  - Fills exactly one through three `minecraft:glass_bottle` items from an
+    explicit, visible, reachable `minecraft:water_cauldron` using normal
+    main-hand interactions. It validates water level, bottle count, and
+    inventory capacity before mutation, then verifies the empty-bottle,
+    water-bottle, and cauldron-level deltas after every fill.
+  - The operation can select glass bottles internally. For an explicit Pilot
+    workflow, call `select_inventory_item` with `minecraft:glass_bottle` after
+    `withdraw_item`, verify `selected=true`, then call this capability.
+  - `aim_at_block`, `deposit_item`, `withdraw_item`, and
+    `fill_water_bottles` all accept the same stable Scene object ID. Copy that
+    ID unchanged between calls; never derive an interaction target from Scene
+    coordinates or a navigation approach pose.
   - Before depositing into a Scene-selected chest, call `aim_at_block` with
-    that Scene centre unchanged and require `aimed=true`; only then call
-    `deposit_item` with the converted native coordinates.
+    that object ID and require `aimed=true`; then pass the same ID to the item
+    action.
   - A reach, visibility, wrong-target, rejected-interaction, synchronization,
     or timeout error is contextual. Call
     `robonix/service/minecraft/manual/lookup` with the exact failure before any
     retry. Never repeat identical deposit arguments without new evidence and
     manual guidance.
 
-The five Minecraft state and action capabilities are declared by the colocated
-`minecraft_mod_actions` primitive only after the Forge client has joined a
-world. Aim, break, and deposit operations are mutually exclusive and reject
-invalid game mode, target, reach, visibility, replacement, synchronization,
-and timeout conditions through the capability error path.
+The Minecraft state and action capabilities are declared by the aggregate
+`minecraft_mod` provider. Its package lifecycle does not activate until the
+Forge client has joined a world. Aim, attack, break, and deposit operations are
+mutually exclusive and reject invalid game mode, target, reach, visibility,
+replacement, synchronization, and timeout conditions through the capability
+error path.
+
+## Target identity provenance
+
+For every Scene-selected Minecraft block, first call
+`robonix/system/scene/list_objects`, select the intended object by its label or
+id, and copy that stable `id` into the Minecraft action unchanged.
+
+- A camera snapshot may confirm the target visually, but it does not produce a
+  stable object ID.
+- `robonix/primitive/minecraft/get_state` reports the player's position, not
+  the target block's position; neither it nor remembered coordinates may be
+  used to construct an action target.
+- Scene coordinates and `goal_near` poses are for generic navigation only.
+  Stop and refresh `scene/list_objects` when an object ID is unknown or stale.
+
+The same identity rule applies to combat: select a live
+`minecraft:zombie` from `scene/list_objects`, pass its unchanged ID to
+`attack_entity`, and let the primitive reacquire its UUID every client tick.
+
+The cauldron workflow is therefore:
+`scene/list_objects` -> copy the selected `minecraft:water_cauldron.id`
+unchanged -> `select_inventory_item(item=minecraft:glass_bottle)` ->
+`aim_at_block` -> `fill_water_bottles`. Pass the same ID unchanged to both
+block operations.
 
 The Mod binds its command interface to loopback only. The Python provider does
 not launch or stop the Minecraft client.

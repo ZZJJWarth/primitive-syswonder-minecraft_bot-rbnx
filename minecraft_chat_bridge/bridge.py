@@ -315,7 +315,8 @@ def progress_message(event: pilot_pb2.PilotEvent) -> tuple[str, bool]:
         if not description:
             return "", False
         if state.state == NODE_RUNNING:
-            return f"正在执行：{description}", False
+            urgent = state.operator_detail.casefold().startswith(("warning:", "error:"))
+            return f"正在执行：{description}", urgent
         if state.state in {NODE_FAILED, NODE_CANCELED, NODE_TIMEOUT}:
             labels = {
                 NODE_FAILED: "步骤失败",

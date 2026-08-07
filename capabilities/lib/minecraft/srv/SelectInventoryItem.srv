@@ -1,0 +1,8 @@
+string item
+---
+bool selected
+string item
+int32 source_slot
+int32 selected_slot
+uint32 selected_count
+bool moved_to_hotbar

@@ -1,0 +1,12 @@
+[contract]
+id      = "robonix/primitive/minecraft/attack_entity"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/AttackEntity.srv"
+description = "Attack one visible nearby minecraft:zombie until its live Entity UUID is confirmed dead. First call robonix/system/scene/list_objects and copy the selected zombie's stable id unchanged into object_id; expected_entity must be minecraft:zombie. The primitive reacquires the moving entity by UUID every client tick, performs bounded local pursuit and cooldown-aware normal attacks, and stops on death, disappearance, timeout, excessive chase distance, player death, or low bot health. Scene coordinates, camera estimates, goal_near poses, players, villagers, pets, and non-whitelisted entities are never accepted as attack targets."
+
+[mode]
+type = "rpc"
+
+[semantics]
+user_invocable = true

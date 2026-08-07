@@ -165,6 +165,8 @@ public final class LocalCommandServer implements AutoCloseable {
                     request.has("pitch_degrees") ? request.get("pitch_degrees").getAsDouble() : 0.0);
             case "stop" -> control.stop();
             case "inventory" -> actions.inventory();
+            case "select_inventory_item" -> actions.selectInventoryItem(
+                    requiredString(request, "item"));
             case "aim_at_block" -> actions.aimAtBlock(
                     requiredInt(request, "x"),
                     requiredInt(request, "y"),
@@ -173,11 +175,27 @@ public final class LocalCommandServer implements AutoCloseable {
             case "break_block" -> actions.breakBlock(
                     requiredString(request, "expected_block"),
                     requiredBoolean(request, "collect"));
+            case "inspect_route_obstacle" -> actions.inspectRouteObstacle(
+                    request.has("max_distance") ? request.get("max_distance").getAsDouble() : 4.0);
+            case "attack_entity" -> actions.attackEntity(
+                    requiredString(request, "entity_uuid"),
+                    requiredString(request, "expected_entity"));
             case "deposit_item" -> actions.depositItem(
                     requiredInt(request, "x"),
                     requiredInt(request, "y"),
                     requiredInt(request, "z"),
                     requiredString(request, "item"),
+                    requiredLong(request, "count"));
+            case "withdraw_item" -> actions.withdrawItem(
+                    requiredInt(request, "x"),
+                    requiredInt(request, "y"),
+                    requiredInt(request, "z"),
+                    requiredString(request, "item"),
+                    requiredLong(request, "count"));
+            case "fill_water_bottles" -> actions.fillWaterBottles(
+                    requiredInt(request, "x"),
+                    requiredInt(request, "y"),
+                    requiredInt(request, "z"),
                     requiredLong(request, "count"));
             case "poll_chat" -> chatBridge.poll(
                     request.has("limit") ? requiredInt(request, "limit") : 16);

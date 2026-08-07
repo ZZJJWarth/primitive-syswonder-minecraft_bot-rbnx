@@ -11,13 +11,14 @@ import re
 import socket
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from robonix_api import ATLAS, Err, Ok, Primitive, Transport
-from robonix_api.lifecycle import CMD_ACTIVATE, CMD_DEACTIVATE, CMD_INIT
+from robonix_api import Err, Ok, Primitive
 from robonix_api.ros import RosBackend
 import chassis_mcp  # noqa: E402
 import minecraft_mcp  # noqa: E402
@@ -31,21 +32,16 @@ from std_msgs_mcp import Empty  # noqa: E402
 
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
-minecraft_camera = Primitive(id="minecraft_mod", namespace="robonix/primitive/camera")
-minecraft_chassis = Primitive(id="minecraft_mod_chassis", namespace="robonix/primitive/chassis")
-minecraft_perception = Primitive(
-    id="minecraft_mod_perception",
-    namespace="robonix/primitive/perception",
-)
-minecraft_lidar = Primitive(id="minecraft_mod_lidar", namespace="robonix/primitive/lidar")
-minecraft_actions = Primitive(
-    id="minecraft_mod_actions",
-    namespace="robonix/primitive/minecraft",
-)
-chassis_bootstrapped = False
-perception_bootstrapped = False
-lidar_bootstrapped = False
-actions_bootstrapped = False
+# One deploy manifest entry is one Atlas provider and one lifecycle owner.
+# Keep the camera driver as this aggregate primitive's package-level lifecycle
+# contract while declaring the colocated chassis, lidar, perception, and
+# Minecraft contracts on the same provider.
+minecraft_mod = Primitive(id="minecraft_mod", namespace="robonix/primitive/camera")
+minecraft_camera = minecraft_mod
+minecraft_chassis = minecraft_mod
+minecraft_perception = minecraft_mod
+minecraft_lidar = minecraft_mod
+minecraft_actions = minecraft_mod
 rgb_publisher = None
 depth_publisher = None
 extrinsics_publisher = None
@@ -73,6 +69,23 @@ cmd_vel_worker_lock = threading.Lock()
 cmd_vel_state_lock = threading.Lock()
 stream_error_lock = threading.Lock()
 last_stream_errors: dict[str, tuple[str, float]] = {}
+semantic_blocks_lock = threading.Lock()
+semantic_block_positions: dict[str, tuple[int, int, int]] = {}
+semantic_entity_targets: dict[str, tuple[str, str]] = {}
+route_obstacles_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class RouteObstacle:
+    """Native target retained behind one short-lived opaque handle."""
+
+    block_name: str
+    position: tuple[int, int, int]
+    recovery_token: str
+    expires_monotonic: float
+
+
+route_obstacles: dict[str, RouteObstacle] = {}
 latest_cmd_vel: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 previous_odom_sample: tuple[float, float, float, float] | None = None
 camera_stream_hz = 5.0
@@ -419,8 +432,10 @@ def observation_timestamp(observation: dict[str, Any]) -> float:
 
 
 def semantic_objects_payload(observation: dict[str, Any]) -> dict[str, Any]:
-    """Convert the Mod's persistent exact-block snapshot into ROS ENU coordinates."""
+    """Convert native targets to generic ROS objects and refresh ID resolution."""
     objects = []
+    native_positions: dict[str, tuple[int, int, int]] = {}
+    native_entities: dict[str, tuple[str, str]] = {}
     for block in observation.get("semanticBlocks") or []:
         position = block.get("position") or {}
         minecraft_x = float(position["x"])
@@ -430,15 +445,73 @@ def semantic_objects_payload(observation: dict[str, Any]) -> dict[str, Any]:
         values = (minecraft_x, minecraft_y, minecraft_z, last_seen)
         if not all(math.isfinite(value) for value in values):
             raise ValueError("Minecraft semantic block coordinates must be finite")
+        if not all(value.is_integer() for value in (minecraft_x, minecraft_y, minecraft_z)):
+            raise ValueError("Minecraft semantic block positions must be integer BlockPos")
+        native_id = str(block["id"] or "").strip()
+        if not native_id:
+            raise ValueError("Minecraft semantic block id must be non-empty")
+        object_id = f"{minecraft_mod.id}/{native_id}"
+        native_positions[object_id] = (
+            int(minecraft_x), int(minecraft_y), int(minecraft_z),
+        )
         objects.append({
-            "id": str(block["id"]),
+            "id": object_id,
             "label": str(block["name"]),
             "x": minecraft_x + 0.5,
             "y": -(minecraft_z + 0.5),
             "z": minecraft_y + 0.5,
             "yaw": 0.0,
             "last_seen_unix": last_seen,
+            "size_x": 1.0,
+            "size_y": 1.0,
+            "size_z": 1.0,
         })
+    for entity in observation.get("nearbyEntities") or []:
+        position = entity.get("position") or {}
+        minecraft_x = float(position["x"])
+        minecraft_y = float(position["y"])
+        minecraft_z = float(position["z"])
+        north_zero_yaw = float(entity["yaw"])
+        width = float(entity["width"])
+        height = float(entity["height"])
+        depth = float(entity["depth"])
+        last_seen = observation_timestamp({"timestamp": entity["lastSeen"]})
+        values = (
+            minecraft_x, minecraft_y, minecraft_z, north_zero_yaw,
+            width, height, depth, last_seen,
+        )
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Minecraft semantic entity fields must be finite")
+        if width <= 0.0 or height <= 0.0 or depth <= 0.0:
+            raise ValueError("Minecraft semantic entity dimensions must be positive")
+        native_id = str(entity["id"] or "").strip()
+        entity_uuid = str(entity["uuid"] or "").strip()
+        label = str(entity["name"] or "").strip()
+        if not native_id or not entity_uuid or not label:
+            raise ValueError("Minecraft semantic entity identity must be non-empty")
+        object_id = f"{minecraft_mod.id}/{native_id}"
+        native_entities[object_id] = (entity_uuid, label)
+        ros_yaw = math.atan2(
+            math.sin(north_zero_yaw + math.pi / 2.0),
+            math.cos(north_zero_yaw + math.pi / 2.0),
+        )
+        objects.append({
+            "id": object_id,
+            "label": label,
+            "x": minecraft_x,
+            "y": -minecraft_z,
+            "z": minecraft_y,
+            "yaw": ros_yaw,
+            "last_seen_unix": last_seen,
+            "size_x": width,
+            "size_y": depth,
+            "size_z": height,
+        })
+    with semantic_blocks_lock:
+        semantic_block_positions.clear()
+        semantic_block_positions.update(native_positions)
+        semantic_entity_targets.clear()
+        semantic_entity_targets.update(native_entities)
     return {
         "frame_id": odom_frame_id,
         "timestamp": observation_timestamp(observation),
@@ -931,92 +1004,10 @@ def stop_cmd_vel_bridge() -> bool:
         return not worker.is_alive()
 
 
-def drive_chassis(command: int, config: dict[str, Any] | None = None):
-    """Send one existing Driver lifecycle command to the colocated chassis provider."""
-    import grpc
-    import lifecycle_pb2  # type: ignore
-    import robonix_contracts_pb2_grpc  # type: ignore
-
-    lifecycle_config = config or {}
-    if command == CMD_INIT:
-        ready_timeout_ms = int(lifecycle_config.get("ready_timeout_ms") or os.environ.get(
-            "RBNX_MINECRAFT_MOD_READY_TIMEOUT_MS", "30000",
-        ))
-        rpc_timeout = ready_timeout_ms / 1000.0 + client.timeout + 5.0
-    else:
-        rpc_timeout = client.timeout + 5.0
-    try:
-        with ATLAS.connect_capability(
-            consumer_id=minecraft_camera.id,
-            provider_id=minecraft_chassis.id,
-            contract_id="robonix/primitive/chassis/driver",
-            transport=Transport.GRPC,
-        ) as route:
-            with grpc.insecure_channel(route.endpoint) as grpc_channel:
-                stub = robonix_contracts_pb2_grpc.RobonixPrimitiveChassisDriverStub(
-                    grpc_channel,
-                )
-                response = stub.Driver(
-                    lifecycle_pb2.Driver_Request(
-                        command=command,
-                        config_json=json.dumps(lifecycle_config),
-                    ),
-                    timeout=rpc_timeout,
-                )
-    except Exception as exc:  # noqa: BLE001
-        return Err(f"chassis lifecycle request failed: {exc}")
-    if not response.ok:
-        return Err(response.error or f"chassis lifecycle entered {response.state}")
-    return Ok()
-
-
-def bootstrap_chassis():
-    """Start chassis serving once and require its existing Driver capability in Atlas."""
-    global chassis_bootstrapped
-    if not chassis_bootstrapped:
-        minecraft_chassis.bootstrap()
-        chassis_bootstrapped = True
-    drivers = ATLAS.find_capability(
-        contract_id="robonix/primitive/chassis/driver",
-        provider_id=minecraft_chassis.id,
-        transport=Transport.GRPC,
-    )
-    if not drivers:
-        return Err("chassis registration failed; restart the provider")
-    return Ok()
-
-
-def bootstrap_perception() -> None:
-    """Register the exact-object publisher under its matching primitive namespace."""
-    global perception_bootstrapped
-    if perception_bootstrapped:
-        return
-    minecraft_perception.bootstrap()
-    perception_bootstrapped = True
-
-
-def bootstrap_lidar() -> None:
-    """Register the collision scan publisher under the standard lidar namespace."""
-    global lidar_bootstrapped
-    if lidar_bootstrapped:
-        return
-    minecraft_lidar.bootstrap()
-    lidar_bootstrapped = True
-
-
-def bootstrap_actions() -> None:
-    """Register item actions only after the Forge client is ready in a world."""
-    global actions_bootstrapped
-    if actions_bootstrapped:
-        return
-    minecraft_actions.bootstrap()
-    actions_bootstrapped = True
-
-
 REGISTRY_NAME = re.compile(r"^[a-z0-9_.-]+:[a-z0-9_./-]+$")
 ACTION_REQUEST_TIMEOUT_SEC = 30.0
 BREAKABLE_BLOCKS = frozenset(("minecraft:dirt", "minecraft:crafting_table"))
-DEPOSITABLE_ITEMS = BREAKABLE_BLOCKS
+ROUTE_OBSTACLE_HANDLE_TTL_SEC = 15.0
 
 
 def exact_int(value: Any, name: str, minimum: int, maximum: int) -> int:
@@ -1065,11 +1056,50 @@ def inventory_mcp(
     return minecraft_mcp.Inventory_Response(selected_slot=selected, slots=slots)
 
 
+@minecraft_actions.mcp("robonix/primitive/minecraft/select_inventory_item")
+def select_inventory_item_mcp(
+    req: minecraft_mcp.SelectInventoryItem_Request,
+) -> minecraft_mcp.SelectInventoryItem_Response:
+    """Select one exact main-inventory item into the live main hand."""
+    item = registry_name(req.item, "item")
+    result = action_request({"cmd": "select_inventory_item", "item": item})
+    selected = result.get("selected")
+    actual_item = registry_name(result.get("item"), "item")
+    source_slot = exact_int(result.get("source_slot"), "source_slot", 0, 35)
+    selected_slot = exact_int(result.get("selected_slot"), "selected_slot", 0, 8)
+    selected_count = exact_int(
+        result.get("selected_count"), "selected_count", 1, 4_294_967_295,
+    )
+    moved_to_hotbar = result.get("moved_to_hotbar")
+    if selected is not True or actual_item != item:
+        raise RuntimeError("Minecraft Mod did not verify the selected main-hand item")
+    if not isinstance(moved_to_hotbar, bool):
+        raise RuntimeError("Minecraft Mod returned invalid hotbar movement state")
+    if moved_to_hotbar != (source_slot >= 9):
+        raise RuntimeError("Minecraft Mod returned inconsistent hotbar movement state")
+    return minecraft_mcp.SelectInventoryItem_Response(
+        selected=True,
+        item=actual_item,
+        source_slot=source_slot,
+        selected_slot=selected_slot,
+        selected_count=selected_count,
+        moved_to_hotbar=moved_to_hotbar,
+    )
+
+
 @minecraft_actions.mcp("robonix/primitive/minecraft/get_state")
 def get_state_mcp(
     req: minecraft_mcp.GetState_Request,
 ) -> minecraft_mcp.GetState_Response:
-    """Return a fresh timestamped Minecraft-world player state snapshot."""
+    """Return a fresh timestamped Minecraft-world Bot/player state snapshot.
+
+    Every position in this response belongs to the Bot/player, not to any
+    chest, cauldron, block, or other interaction target. MUST NOT copy or adapt
+    these coordinates into aim_at_block, fill_water_bottles, withdraw_item, or
+    deposit_item. For a physical-object target, MUST call
+    ``scene_list_objects`` and copy that object's stable ID unchanged. Never
+    infer a target from the Bot's position.
+    """
     _ = req
     observation = client.request({"cmd": "observe"})
     captured_at = str(observation.get("timestamp") or "")
@@ -1122,11 +1152,144 @@ def get_state_mcp(
     )
 
 
-def validated_coordinates(req: Any) -> tuple[int, int, int]:
-    """Validate signed int32 block coordinates from a generated MCP request."""
-    return tuple(
-        exact_int(getattr(req, axis), axis, -2_147_483_648, 2_147_483_647)
-        for axis in ("x", "y", "z")
+def native_block_pos(object_id: Any) -> tuple[int, int, int]:
+    """Resolve a Scene-preserved structured object ID to native BlockPos."""
+    target_id = str(object_id or "").strip()
+    if not target_id:
+        raise ValueError("object_id must be non-empty")
+    with semantic_blocks_lock:
+        position = semantic_block_positions.get(target_id)
+    if position is None:
+        raise ValueError(
+            f"unknown or stale Minecraft semantic object_id: {target_id}; "
+            "call scene/list_objects again"
+        )
+    return position
+
+
+def native_entity_target(object_id: Any, expected_entity: Any) -> tuple[str, str]:
+    """Resolve one stable Scene object ID to a live native entity UUID."""
+    target_id = str(object_id or "").strip()
+    expected = registry_name(expected_entity, "expected_entity")
+    if not target_id:
+        raise ValueError("object_id must be non-empty")
+    with semantic_blocks_lock:
+        target = semantic_entity_targets.get(target_id)
+    if target is None:
+        raise ValueError(
+            f"unknown or stale Minecraft semantic entity object_id: {target_id}; "
+            "call scene/list_objects again"
+        )
+    entity_uuid, actual = target
+    if actual != expected:
+        raise ValueError(f"target entity is {actual}, not {expected}")
+    return entity_uuid, actual
+
+
+def _prune_route_obstacles(now: float) -> None:
+    """Remove expired native targets while the caller holds the handle lock."""
+    expired = [
+        handle
+        for handle, obstacle in route_obstacles.items()
+        if obstacle.expires_monotonic <= now
+    ]
+    for handle in expired:
+        route_obstacles.pop(handle, None)
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/inspect_route_obstacle")
+def inspect_route_obstacle_mcp(
+    req: minecraft_mcp.InspectRouteObstacle_Request,
+) -> minecraft_mcp.InspectRouteObstacle_Response:
+    """Inspect the short forward corridor and retain native coordinates locally."""
+    recovery_token = str(req.recovery_token or "").strip()
+    if not recovery_token or len(recovery_token) > 128:
+        raise ValueError("recovery_token must contain from 1 through 128 characters")
+    distance = float(req.max_distance_m)
+    if not math.isfinite(distance) or not 0.5 <= distance <= 4.5:
+        raise ValueError("max_distance_m must be from 0.5 through 4.5")
+    result = action_request({
+        "cmd": "inspect_route_obstacle",
+        "max_distance": distance,
+    })
+    found = result.get("found")
+    if not isinstance(found, bool):
+        raise RuntimeError("Minecraft Mod returned invalid obstacle presence")
+    if not found:
+        return minecraft_mcp.InspectRouteObstacle_Response(
+            found=False,
+            obstacle_handle="",
+            block_name="",
+            clearable=False,
+            detail="no collidable block found in the short forward corridor",
+        )
+    block_name = registry_name(result.get("block_name"), "block_name")
+    position = (
+        exact_int(result.get("x"), "x", -30_000_000, 30_000_000),
+        exact_int(result.get("y"), "y", -2048, 2048),
+        exact_int(result.get("z"), "z", -30_000_000, 30_000_000),
+    )
+    handle = str(uuid.uuid4())
+    now = time.monotonic()
+    with route_obstacles_lock:
+        _prune_route_obstacles(now)
+        route_obstacles[handle] = RouteObstacle(
+            block_name=block_name,
+            position=position,
+            recovery_token=recovery_token,
+            expires_monotonic=now + ROUTE_OBSTACLE_HANDLE_TTL_SEC,
+        )
+    clearable = block_name in BREAKABLE_BLOCKS
+    return minecraft_mcp.InspectRouteObstacle_Response(
+        found=True,
+        obstacle_handle=handle,
+        block_name=block_name,
+        clearable=clearable,
+        detail=(
+            "one allowlisted route obstacle can be cleared"
+            if clearable
+            else "the route obstacle is not on the clear allowlist"
+        ),
+    )
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/clear_route_obstacle")
+def clear_route_obstacle_mcp(
+    req: minecraft_mcp.ClearRouteObstacle_Request,
+) -> minecraft_mcp.ClearRouteObstacle_Response:
+    """Consume one handle, re-aim at its live block, and clear exactly that block."""
+    handle = str(req.obstacle_handle or "").strip()
+    if not handle:
+        raise ValueError("obstacle_handle must be non-empty")
+    now = time.monotonic()
+    with route_obstacles_lock:
+        _prune_route_obstacles(now)
+        obstacle = route_obstacles.pop(handle, None)
+    if obstacle is None:
+        raise ValueError("unknown or expired obstacle_handle; inspect the route obstacle again")
+    if obstacle.block_name not in BREAKABLE_BLOCKS:
+        raise ValueError("the inspected obstacle is not on the clear allowlist")
+    x, y, z = obstacle.position
+    aimed = action_request({
+        "cmd": "aim_at_block",
+        "x": x,
+        "y": y,
+        "z": z,
+        "expected_block": obstacle.block_name,
+    })
+    if aimed.get("aimed") is not True or aimed.get("actual_block") != obstacle.block_name:
+        raise RuntimeError("Minecraft Mod did not revalidate the inspected route obstacle")
+    broken = action_request({
+        "cmd": "break_block",
+        "expected_block": obstacle.block_name,
+        "collect": False,
+    })
+    if broken.get("block_broken") is not True or broken.get("original_block") != obstacle.block_name:
+        raise RuntimeError("Minecraft Mod did not verify route obstacle destruction")
+    return minecraft_mcp.ClearRouteObstacle_Response(
+        cleared=True,
+        block_name=obstacle.block_name,
+        detail="cleared one verified route obstacle",
     )
 
 
@@ -1167,40 +1330,67 @@ def break_block_mcp(
     )
 
 
+@minecraft_actions.mcp("robonix/primitive/minecraft/attack_entity")
+def attack_entity_mcp(
+    req: minecraft_mcp.AttackEntity_Request,
+) -> minecraft_mcp.AttackEntity_Response:
+    """Kill one Scene-selected zombie through a bounded native combat loop.
+
+    MUST call ``scene_list_objects`` first and copy the selected
+    ``minecraft:zombie`` object's stable ``id`` unchanged into ``object_id``.
+    The primitive resolves that identity to a live Entity UUID; Scene
+    coordinates, camera estimates, and navigation poses are never targets.
+    """
+    entity_uuid, expected = native_entity_target(req.object_id, req.expected_entity)
+    if expected != "minecraft:zombie":
+        raise ValueError("expected_entity must be minecraft:zombie")
+    result = action_request({
+        "cmd": "attack_entity",
+        "entity_uuid": entity_uuid,
+        "expected_entity": expected,
+    })
+    killed = result.get("killed")
+    actual = registry_name(result.get("actual_entity"), "actual_entity")
+    attacks_attempted = exact_int(
+        result.get("attacks_attempted"), "attacks_attempted", 0, 4_294_967_295,
+    )
+    attacks_landed = exact_int(
+        result.get("attacks_landed"), "attacks_landed", 0, attacks_attempted,
+    )
+    health_before = float(result.get("bot_health_before"))
+    health_after = float(result.get("bot_health_after"))
+    if killed is not True or actual != expected:
+        raise RuntimeError("Minecraft Mod did not verify the requested entity kill")
+    if not all(math.isfinite(value) for value in (health_before, health_after)):
+        raise RuntimeError("Minecraft Mod returned non-finite combat health")
+    if health_before < 0.0 or health_after < 0.0:
+        raise RuntimeError("Minecraft Mod returned negative combat health")
+    return minecraft_mcp.AttackEntity_Response(
+        killed=True,
+        object_id=str(req.object_id),
+        actual_entity=actual,
+        attacks_attempted=attacks_attempted,
+        attacks_landed=attacks_landed,
+        bot_health_before=health_before,
+        bot_health_after=health_after,
+    )
+
+
 @minecraft_actions.mcp("robonix/primitive/minecraft/aim_at_block")
 def aim_at_block_mcp(
-    req: minecraft_mcp.AimAtBlock_Request,
-) -> minecraft_mcp.AimAtBlock_Response:
+    req: minecraft_mcp.AimAtBlockV2_Request,
+) -> minecraft_mcp.AimAtBlockV2_Response:
     """Gradually aim the live crosshair at one visible reachable block.
 
-    Accept the exact block-centre coordinates returned by Scene in
-    ``minecraft_odom`` and convert them here instead of asking the VLM to
-    transpose axes and remove the centre offset. ``expected_block`` is the
-    exact namespaced registry name. This capability only turns the view and
-    never attacks or uses the target. Wait until navigation is terminal before
-    calling it.
+    Before calling, MUST call ``scene_list_objects``, select the intended
+    physical object, and copy its stable ``id`` unchanged into ``object_id``.
+    A camera image, remembered coordinates, and ``minecraft_get_state`` cannot
+    supply this ID. The primitive resolves it to native BlockPos internally.
+    ``expected_block`` is the exact namespaced registry name. This capability
+    only turns the view and never attacks or uses the target. Wait until
+    navigation is terminal before calling it.
     """
-    navigation_values = (
-        float(req.navigation_x),
-        float(req.navigation_y),
-        float(req.navigation_z),
-    )
-    if not all(math.isfinite(value) for value in navigation_values):
-        raise ValueError("Scene navigation coordinates must be finite")
-    if not all(
-        math.isclose(value - math.floor(value), 0.5, abs_tol=1e-6)
-        for value in navigation_values
-    ):
-        raise ValueError(
-            "coordinates must be an exact Scene block-centre, not a robot or goal_near pose"
-        )
-    navigation_x, navigation_y, navigation_z = navigation_values
-    # Exact semantic blocks are published at their centres:
-    # odom x = block x + 0.5; odom y = -(block z + 0.5);
-    # odom z = block y + 0.5.
-    x = math.floor(navigation_x)
-    y = math.floor(navigation_z)
-    z = math.floor(-navigation_y)
+    x, y, z = native_block_pos(req.object_id)
     expected = registry_name(req.expected_block, "expected_block")
     result = action_request({
         "cmd": "aim_at_block",
@@ -1222,7 +1412,7 @@ def aim_at_block_mcp(
         raise RuntimeError("Minecraft Mod returned non-finite final view angles")
     if not -90.0 <= final_pitch <= 90.0:
         raise RuntimeError("Minecraft Mod returned an invalid final pitch")
-    return minecraft_mcp.AimAtBlock_Response(
+    return minecraft_mcp.AimAtBlockV2_Response(
         aimed=True,
         actual_block=actual,
         hit_face=hit_face,
@@ -1233,16 +1423,18 @@ def aim_at_block_mcp(
 
 @minecraft_actions.mcp("robonix/primitive/minecraft/deposit_item")
 def deposit_item_mcp(
-    req: minecraft_mcp.DepositItem_Request,
-) -> minecraft_mcp.DepositItem_Response:
-    """Deposit one supported item into an explicit reachable chest and verify counts."""
-    x, y, z = validated_coordinates(req)
+    req: minecraft_mcp.DepositItemV2_Request,
+) -> minecraft_mcp.DepositItemV2_Response:
+    """Deposit an exact positive quantity of any registered item into a chest.
+
+    Before calling, MUST call ``scene_list_objects``, select the intended
+    chest, and copy its stable ``id`` unchanged into ``object_id``. Camera
+    images, remembered coordinates, and ``minecraft_get_state`` cannot supply
+    this ID. If Scene has no matching chest, stop instead of inventing one.
+    """
     item = registry_name(req.item, "item")
-    count = exact_int(req.count, "count", 1, 4_294_967_295)
-    if item not in DEPOSITABLE_ITEMS:
-        raise ValueError("item must be minecraft:dirt or minecraft:crafting_table")
-    if count != 1:
-        raise ValueError("count must be exactly 1")
+    count = exact_int(req.count, "count", 1, 2_147_483_647)
+    x, y, z = native_block_pos(req.object_id)
     result = action_request({
         "cmd": "deposit_item",
         "x": x,
@@ -1261,13 +1453,98 @@ def deposit_item_mcp(
             "container_count_after",
         )
     }
-    if fields["transferred_count"] != 1:
-        raise RuntimeError("Minecraft Mod did not verify exactly one transferred item")
-    if fields["player_count_after"] != fields["player_count_before"] - 1:
+    if fields["transferred_count"] != count:
+        raise RuntimeError("Minecraft Mod did not verify the requested transferred item count")
+    if fields["player_count_after"] != fields["player_count_before"] - count:
         raise RuntimeError("Minecraft Mod player inventory counts are inconsistent")
-    if fields["container_count_after"] != fields["container_count_before"] + 1:
+    if fields["container_count_after"] != fields["container_count_before"] + count:
         raise RuntimeError("Minecraft Mod container counts are inconsistent")
-    return minecraft_mcp.DepositItem_Response(**fields)
+    return minecraft_mcp.DepositItemV2_Response(**fields)
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/withdraw_item")
+def withdraw_item_mcp(
+    req: minecraft_mcp.WithdrawItemV2_Request,
+) -> minecraft_mcp.WithdrawItemV2_Response:
+    """Withdraw an exact positive quantity of one registry item from a chest.
+
+    Before calling, MUST call ``scene_list_objects``, select the intended
+    chest, and copy its stable ``id`` unchanged into ``object_id``. Camera
+    images, remembered coordinates, and ``minecraft_get_state`` cannot supply
+    this ID. If Scene has no matching chest, stop instead of inventing one.
+    """
+    item = registry_name(req.item, "item")
+    count = exact_int(req.count, "count", 1, 4_294_967_295)
+    x, y, z = native_block_pos(req.object_id)
+    result = action_request({
+        "cmd": "withdraw_item",
+        "x": x,
+        "y": y,
+        "z": z,
+        "item": item,
+        "count": count,
+    })
+    fields = {
+        name: exact_int(result.get(name), name, 0, 4_294_967_295)
+        for name in (
+            "transferred_count",
+            "player_count_before",
+            "player_count_after",
+            "container_count_before",
+            "container_count_after",
+        )
+    }
+    if fields["transferred_count"] != count:
+        raise RuntimeError("Minecraft Mod did not verify the requested transferred count")
+    if fields["player_count_after"] != fields["player_count_before"] + count:
+        raise RuntimeError("Minecraft Mod player inventory counts are inconsistent")
+    if fields["container_count_after"] != fields["container_count_before"] - count:
+        raise RuntimeError("Minecraft Mod container counts are inconsistent")
+    return minecraft_mcp.WithdrawItemV2_Response(**fields)
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/fill_water_bottles")
+def fill_water_bottles_mcp(
+    req: minecraft_mcp.FillWaterBottlesV2_Request,
+) -> minecraft_mcp.FillWaterBottlesV2_Response:
+    """Fill an exact positive number of bottles from one water cauldron.
+
+    Before calling, MUST call ``scene_list_objects``, select the
+    ``minecraft:water_cauldron``, and copy its stable ``id`` unchanged into
+    ``object_id``. A camera image, remembered coordinates, and
+    ``minecraft_get_state`` cannot supply this ID. Use the same object ID for
+    the preceding ``minecraft_aim_at_block`` call.
+    """
+    count = exact_int(req.count, "count", 1, 3)
+    x, y, z = native_block_pos(req.object_id)
+    result = action_request({
+        "cmd": "fill_water_bottles",
+        "x": x,
+        "y": y,
+        "z": z,
+        "count": count,
+    })
+    fields = {
+        name: exact_int(result.get(name), name, 0, 4_294_967_295)
+        for name in (
+            "filled_count",
+            "empty_bottles_before",
+            "empty_bottles_after",
+            "water_bottles_before",
+            "water_bottles_after",
+            "cauldron_level_before",
+            "cauldron_level_after",
+        )
+    }
+    if fields["filled_count"] != count:
+        raise RuntimeError("Minecraft Mod did not verify the requested filled bottle count")
+    if fields["empty_bottles_after"] != fields["empty_bottles_before"] - count:
+        raise RuntimeError("Minecraft Mod empty bottle counts are inconsistent")
+    if fields["water_bottles_after"] != fields["water_bottles_before"] + count:
+        raise RuntimeError("Minecraft Mod water bottle counts are inconsistent")
+    if fields["cauldron_level_after"] != fields["cauldron_level_before"] - count:
+        raise RuntimeError("Minecraft Mod cauldron levels are inconsistent")
+    return minecraft_mcp.FillWaterBottlesV2_Response(**fields)
 
 
 @minecraft_camera.mcp("robonix/primitive/camera/snapshot")
@@ -1409,7 +1686,6 @@ def init_mod(config: dict[str, Any]):
     ))
     try:
         persist_observation(client.wait_ready(timeout_ms))
-        bootstrap_actions()
     except Exception as exc:  # noqa: BLE001
         return Err(str(exc))
     return Ok()
@@ -1439,10 +1715,7 @@ def initialize_camera(config: dict[str, Any]):
     if all(publisher is not None for publisher in camera_publishers):
         if odom_publisher is not None:
             return Ok()
-        chassis_bootstrap = bootstrap_chassis()
-        if isinstance(chassis_bootstrap, Err):
-            return chassis_bootstrap
-        return drive_chassis(CMD_INIT, config)
+        return initialize_chassis(config)
     if any(publisher is not None for publisher in camera_publishers):
         return Err("camera publisher initialization is incomplete; restart the provider")
     try:
@@ -1489,8 +1762,6 @@ def initialize_camera(config: dict[str, Any]):
         odom_frame_id = str(config.get("odom_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_ODOM_FRAME_ID", odom_frame_id,
         ))
-        bootstrap_perception()
-        bootstrap_lidar()
         rgb_publisher = minecraft_camera.create_publisher(
             "robonix/primitive/camera/rgb",
             topic=rgb_topic,
@@ -1535,10 +1806,7 @@ def initialize_camera(config: dict[str, Any]):
         publish_extrinsics()
     except Exception as exc:  # noqa: BLE001
         return Err(f"ROS2 camera stream initialization failed: {exc}")
-    chassis_bootstrap = bootstrap_chassis()
-    if isinstance(chassis_bootstrap, Err):
-        return chassis_bootstrap
-    chassis_result = drive_chassis(CMD_INIT, config)
+    chassis_result = initialize_chassis(config)
     if isinstance(chassis_result, Err):
         return chassis_result
     return Ok()
@@ -1553,7 +1821,7 @@ def init_camera(config: dict[str, Any]):
 
 @minecraft_camera.on_activate
 def activate_camera():
-    """Activate chassis odometry through Driver and start continuous camera streams."""
+    """Activate every stream owned by the aggregate Minecraft provider."""
     with camera_lifecycle_lock:
         if any(publisher is None for publisher in (
             rgb_publisher,
@@ -1563,7 +1831,7 @@ def activate_camera():
             lidar_publisher,
         )):
             return Err("camera and lidar streams are not initialized")
-        chassis_result = drive_chassis(CMD_ACTIVATE)
+        chassis_result = activate_chassis()
         if isinstance(chassis_result, Err):
             return chassis_result
         try:
@@ -1573,7 +1841,7 @@ def activate_camera():
         except Exception as exc:  # noqa: BLE001
             camera_stopped = stop_camera_stream()
             lidar_stopped = stop_lidar_stream()
-            rollback = drive_chassis(CMD_DEACTIVATE)
+            rollback = deactivate_chassis()
             detail = f"camera stream activation failed: {exc}"
             if not camera_stopped:
                 detail += "; camera worker rollback timed out"
@@ -1587,11 +1855,11 @@ def activate_camera():
 
 @minecraft_camera.on_deactivate
 def deactivate_camera():
-    """Stop camera publication and deactivate chassis odometry through Driver."""
+    """Stop every stream owned by the aggregate Minecraft provider."""
     with camera_lifecycle_lock:
         camera_stopped = stop_camera_stream()
         lidar_stopped = stop_lidar_stream()
-        chassis_result = drive_chassis(CMD_DEACTIVATE)
+        chassis_result = deactivate_chassis()
     if not camera_stopped:
         return Err("camera stream worker did not stop before timeout")
     if not lidar_stopped:
@@ -1603,15 +1871,11 @@ def deactivate_camera():
 
 @minecraft_camera.on_shutdown
 def shutdown_camera():
-    """Stop camera publication and deactivate chassis before process teardown."""
+    """Stop every worker before the aggregate provider tears down."""
     with camera_lifecycle_lock:
         camera_stopped = stop_camera_stream()
         lidar_stopped = stop_lidar_stream()
-        chassis_result = (
-            drive_chassis(CMD_DEACTIVATE)
-            if chassis_bootstrapped
-            else Ok()
-        )
+        chassis_result = shutdown_chassis()
     if not camera_stopped:
         return Err("camera stream worker did not stop before timeout")
     if not lidar_stopped:
@@ -1677,14 +1941,12 @@ def initialize_chassis(config: dict[str, Any]):
     return Ok()
 
 
-@minecraft_chassis.on_init
 def init_chassis(config: dict[str, Any]):
-    """Serialize the complete chassis publisher initialization transaction."""
+    """Initialize the chassis portion of the aggregate provider."""
     with chassis_lifecycle_lock:
         return initialize_chassis(config)
 
 
-@minecraft_chassis.on_activate
 def activate_chassis():
     """Start continuous odometry and the bounded Nav2 Twist bridge."""
     with chassis_lifecycle_lock:
@@ -1695,7 +1957,6 @@ def activate_chassis():
     return Ok()
 
 
-@minecraft_chassis.on_deactivate
 def deactivate_chassis():
     """Stop odometry and fail closed on any active Nav2 velocity."""
     with chassis_lifecycle_lock:
@@ -1706,7 +1967,6 @@ def deactivate_chassis():
     return Ok()
 
 
-@minecraft_chassis.on_shutdown
 def shutdown_chassis():
     """Stop all chassis workers before provider teardown."""
     with chassis_lifecycle_lock:
@@ -1718,8 +1978,8 @@ def shutdown_chassis():
 
 
 def run_providers() -> None:
-    """Run the camera provider until Robonix requests shutdown."""
-    minecraft_camera.run()
+    """Run the aggregate Minecraft provider until Robonix requests shutdown."""
+    minecraft_mod.run()
 
 
 if __name__ == "__main__":

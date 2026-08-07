@@ -156,16 +156,24 @@ rear obstacles do not require turning the first-person camera.
 
 The provider also publishes exact semantic observations for visible chests,
 trapped chests, crafting tables, furnaces, empty cauldrons, and water
-cauldrons. Discovery is local and occurs
+cauldrons, plus currently visible live zombies identified by Entity UUID.
+Discovery is local and occurs
 during exploration rather than preloading the world. Discovered blocks remain
 in the snapshot after the player leaves, while revisiting a changed location
 updates or removes its entry. Scene consumes this stream alongside visual
 perception, so exact Minecraft blocks do not depend on YOLO vocabulary.
+Zombie entries update in place while moving and disappear from the complete
+snapshot when dead, out of range, or no longer visible.
 
-Pilot can also compose five Minecraft state and action capabilities directly:
+Pilot can also compose the Minecraft state and action capabilities directly:
 
 - `robonix/primitive/minecraft/inventory` reports main inventory slots 0-35
   (hotbar 0-8) and offhand slot 40 with exact item registry names.
+- `robonix/primitive/minecraft/select_inventory_item` selects the largest
+  matching main-inventory stack into the main hand. Hotbar items are selected
+  directly; slots 9-35 are swapped into the current hotbar slot and verified
+  for three synchronized client ticks. For an empty bottle, pass the exact
+  item name `minecraft:glass_bottle`.
 - `robonix/primitive/minecraft/get_state` returns a fresh timestamped compact
   snapshot of the player's Minecraft-world pose and status without changing
   the player or world, together with its converted ROS navigation pose. A
@@ -174,10 +182,9 @@ Pilot can also compose five Minecraft state and action capabilities directly:
   fields; native Minecraft coordinate targets use
   `robonix/service/navigation/navigate_world`.
 - `robonix/primitive/minecraft/aim_at_block` gradually turns toward an exact
-  Scene object at bounded yaw and pitch rates. Pass the object's
-  `minecraft_odom` centroid unchanged as `navigation_x/y/z`; the provider
-  converts it to the native Minecraft block position. Do not pass the robot
-  pose or the approach pose returned by `scene/goal_near`. It succeeds only
+  Scene object at bounded yaw and pitch rates. Pass the object's stable ID
+  unchanged; the provider resolves it to the native Minecraft block position.
+  Scene coordinates and `scene/goal_near` approach poses are rejected. It succeeds only
   after the live crosshair stably hits the visible, interaction-reachable block
   with the expected registry name, and does not interact with that block.
 - `robonix/primitive/minecraft/break_block` targets the block currently under
@@ -185,17 +192,35 @@ Pilot can also compose five Minecraft state and action capabilities directly:
   `minecraft:crafting_table`, and can wait for matching synchronized pickup
   verification. It stops attacking and walks toward the former block centre
   when collection is requested. Aim at the intended block before calling it.
-- `robonix/primitive/minecraft/deposit_item` accepts a native Minecraft chest
-  `BlockPos` and transfers exactly one main-inventory `minecraft:dirt` or
-  `minecraft:crafting_table`, reporting synchronized player and container
-  counts. Never copy Scene `minecraft_odom` axes directly into `x/y/z`. Convert
-  an exact Scene centre with `x=floor(scene_x)`, `y=floor(scene_z)`,
-  `z=floor(-scene_y)`, after `aim_at_block` has verified the unchanged Scene
-  centroid.
+- Route-obstacle recovery is split into two small primitives. Inspection
+  accepts an opaque navigation recovery token and returns a 15-second handle;
+  clearing consumes that handle and can remove only one live dirt or
+  crafting-table block. Minecraft coordinates remain private to the provider.
+- `robonix/primitive/minecraft/attack_entity` accepts a Scene-selected
+  `minecraft:zombie` object ID and resolves it to the live Entity UUID. The Mod
+  performs bounded pursuit, gradual aiming, cooldown-aware attacks, and death
+  verification. It stops on low health, timeout, disappearance, or excessive
+  chase distance and never accepts players or other entity types.
+- `robonix/primitive/minecraft/deposit_item` accepts a stable chest object ID
+  and transfers an exact positive quantity of any registered item ID, reporting
+  synchronized player and container counts. It fails before mutation when the
+  main inventory has too few items or the chest lacks capacity. It accepts
+  and resolves it through the primitive's current native BlockPos registry.
+- `robonix/primitive/minecraft/withdraw_item` accepts the same stable chest
+  object ID, any exact registered item name, and a positive quantity. It
+  transfers exactly that quantity or fails before mutation when the chest has
+  none, has too few, or the player's main inventory lacks capacity.
+- `robonix/primitive/minecraft/fill_water_bottles` accepts a stable water
+  cauldron object ID and a count from one through three. It checks water
+  level, main-inventory glass bottles, and inventory capacity before using the
+  cauldron, then verifies all bottle and level deltas after every interaction.
+  It retains an internal bottle-selection fallback, but a visible workflow can
+  call `select_inventory_item(minecraft:glass_bottle)` after withdrawal first.
 
 These capabilities use ordinary client state and interactions rather than
 changing the world directly. Targets must be loaded, visible, and within
-interaction reach. Only one aim, break, or deposit operation runs at a time;
+interaction reach. Only one aim, attack, item-selection, break, deposit, withdraw, or bottle-fill
+operation runs at a time;
 disconnect, death, menu replacement, timeout, or a failed server
 synchronization returns an error. Do not call aim directly while navigation
 reports `navigating`; wait for navigation to become terminal first.
@@ -280,6 +305,7 @@ that process itself. Only one wrapper may use a display at a time. Set
   default `540`. Capture scaling preserves the client framebuffer aspect ratio.
 - `RBNX_MINECRAFT_JPEG_QUALITY`: JPEG quality from `0.1` to `1.0`, default `0.8`.
 - `RBNX_MINECRAFT_BLOCK_RADIUS`: structured block scan radius, default `5`.
+- `RBNX_MINECRAFT_ENTITY_RADIUS`: visible zombie scan radius, default `16`.
 - `RBNX_MINECRAFT_MOD_HOST`: provider connection host, default `127.0.0.1`.
 - `RBNX_MINECRAFT_MOD_TIMEOUT_SEC`: provider command timeout, default `35`;
   valid range `0.1` through `300`.

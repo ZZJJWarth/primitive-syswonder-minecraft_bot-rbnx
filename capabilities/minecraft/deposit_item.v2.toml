@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/minecraft/deposit_item"
+version = "2"
+kind    = "primitive"
+idl     = "minecraft/srv/DepositItemV2.srv"
+description = "Deposit an exact positive quantity of any registered Minecraft item ID from main inventory into a visible reachable chest. First call robonix/system/scene/list_objects and copy the selected chest's stable id unchanged into object_id; the primitive resolves it to native BlockPos. Never derive a target from Scene coordinates, a camera image, memory, goal_near, or minecraft/get_state. Unknown or stale IDs require a fresh Scene query. Invalid item IDs, insufficient inventory or capacity, crosshair misses, synchronization errors, and timeouts remain explicit failures."
+
+[mode]
+type = "rpc"

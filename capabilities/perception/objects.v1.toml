@@ -2,8 +2,12 @@
 # The String data is JSON:
 # {"frame_id":str,"timestamp":unix,"objects":[
 #   {"id":str,"label":str,"x":float,"y":float,"z":float,
-#    "yaw":float,"last_seen_unix":float}
+#    "yaw":float,"last_seen_unix":float,
+#    "size_x":float,"size_y":float,"size_z":float}
 # ]}
+# `id` is globally unique and stable so the owning primitive can resolve it
+# for later native interactions. Sizes are positive source-frame axis-aligned
+# extents in metres and are optional for backward compatibility (default 0.1).
 # An object absent from a newer snapshot is no longer present at the source.
 [contract]
 id      = "robonix/primitive/perception/objects"

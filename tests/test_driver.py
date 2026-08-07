@@ -17,6 +17,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PIL import Image as PILImage
+import yaml
 
 import minecraft_mod_driver.driver as driver
 from minecraft_mod_driver.driver import (
@@ -40,19 +41,59 @@ from minecraft_mod_driver.driver import (
 )
 
 
+def semantic_target(x: int = 2, y: int = 64, z: int = 1) -> str:
+    """Register one stable semantic ID as the primitive's native target."""
+    object_id = f"test:dimension@{x},{y},{z}"
+    with driver.semantic_blocks_lock:
+        driver.semantic_block_positions[object_id] = (x, y, z)
+    return object_id
+
+
+def semantic_entity_target(
+    entity_uuid: str = "12345678-1234-5678-1234-567812345678",
+    label: str = "minecraft:zombie",
+) -> str:
+    """Register one stable Scene identity as a live native entity target."""
+    object_id = f"{driver.minecraft_mod.id}/entity:test@{entity_uuid}"
+    with driver.semantic_blocks_lock:
+        driver.semantic_entity_targets[object_id] = (entity_uuid, label)
+    return object_id
+
+
 class MinecraftModClientTest(unittest.TestCase):
     """Exercises the provider side without launching Minecraft."""
 
-    def test_providers_own_contracts_under_matching_namespaces(self) -> None:
-        """Keep camera, chassis, and exact perception declarations namespace-valid."""
+    def test_one_provider_owns_all_colocated_contracts(self) -> None:
+        """Keep one deploy instance, provider identity, and lifecycle owner."""
         self.assertEqual(driver.minecraft_camera.namespace, "robonix/primitive/camera")
-        self.assertEqual(driver.minecraft_chassis.namespace, "robonix/primitive/chassis")
-        self.assertEqual(driver.minecraft_perception.namespace, "robonix/primitive/perception")
-        self.assertEqual(driver.minecraft_lidar.namespace, "robonix/primitive/lidar")
-        self.assertEqual(driver.minecraft_actions.namespace, "robonix/primitive/minecraft")
+        self.assertIs(driver.minecraft_camera, driver.minecraft_mod)
+        self.assertIs(driver.minecraft_chassis, driver.minecraft_mod)
+        self.assertIs(driver.minecraft_perception, driver.minecraft_mod)
+        self.assertIs(driver.minecraft_lidar, driver.minecraft_mod)
+        self.assertIs(driver.minecraft_actions, driver.minecraft_mod)
 
-    def test_deposit_prompt_requires_conversion_aim_and_manual(self) -> None:
-        """Keep the VLM-facing contract explicit about all recovery preconditions."""
+    def test_aggregate_provider_has_one_lifecycle_contract(self) -> None:
+        """Keep camera/driver as the package's sole lifecycle entry point."""
+        provider = driver.minecraft_mod
+        self.assertIs(provider._on_init, driver.init_camera)
+        self.assertIs(provider._on_activate, driver.activate_camera)
+        self.assertIs(provider._on_deactivate, driver.deactivate_camera)
+        self.assertIs(provider._on_shutdown, driver.shutdown_camera)
+
+        manifest_path = Path(__file__).resolve().parents[1] / "package_manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        lifecycle_contracts = [
+            capability["name"]
+            for capability in manifest["capabilities"]
+            if capability["name"].endswith("/driver")
+        ]
+        self.assertEqual(
+            lifecycle_contracts,
+            ["robonix/primitive/camera/driver"],
+        )
+
+    def test_legacy_deposit_prompt_forbids_scene_coordinate_conversion(self) -> None:
+        """Keep the compatibility contract native and direct Scene callers to v2."""
         contract = (
             Path(__file__).resolve().parents[1]
             / "capabilities"
@@ -62,10 +103,67 @@ class MinecraftModClientTest(unittest.TestCase):
         with contract.open("rb") as stream:
             description = tomllib.load(stream)["contract"]["description"]
         self.assertIn("native Minecraft BlockPos", description)
-        self.assertIn("x=floor(scene_x)", description)
-        self.assertIn("first call aim_at_block", description)
-        self.assertIn("call minecraft_manual.manual_lookup", description)
-        self.assertIn("before any retry", description)
+        self.assertIn("must never be derived from Scene coordinates", description)
+        self.assertIn("v2 with a stable object_id", description)
+
+    def test_deposit_mod_separates_reach_from_crosshair_failure(self) -> None:
+        """Keep deposit errors actionable instead of reporting every miss as reach."""
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "main"
+            / "java"
+            / "com"
+            / "robonix"
+            / "minecraftmod"
+            / "MinecraftActions.java"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        validation = source[
+            source.index("private static BlockHitResult validateDepositTarget"):
+            source.index(
+                "private static BlockHitResult validateExpectedTarget",
+                source.index("private static BlockHitResult validateDepositTarget"),
+            )
+        ]
+        reach_error = validation.index("target block is outside interaction reach")
+        aim_error = validation.index("crosshair is not aimed at target chest")
+        self.assertLess(reach_error, aim_error)
+        self.assertIn("minecraft.hitResult", validation)
+
+    def test_deposit_mod_accepts_registered_ids_and_preflights_exact_quantity(self) -> None:
+        """Keep arbitrary registry IDs, inventory checks, and capacity checks in the Mod."""
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "main"
+            / "java"
+            / "com"
+            / "robonix"
+            / "minecraftmod"
+            / "MinecraftActions.java"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        deposit = source[
+            source.index("public CompletableFuture<JsonObject> depositItem"):
+            source.index(
+                "public CompletableFuture<JsonObject> withdrawItem",
+                source.index("public CompletableFuture<JsonObject> depositItem"),
+            )
+        ]
+        tick = source[
+            source.index("private void tickDeposit"):
+            source.index(
+                "private static void pickNextDepositSource",
+                source.index("private void tickDeposit"),
+            )
+        ]
+        self.assertIn("item name is not registered", deposit)
+        self.assertIn("player main inventory contains only ", deposit)
+        self.assertNotIn("item must be minecraft:dirt", deposit)
+        self.assertIn("containerCapacity", tick)
+        self.assertLess(tick.index("containerCapacity"), tick.index("pickNextDepositSource"))
+        self.assertIn("action.requestedCount()", tick)
 
     def test_lidar_scan_normalizes_no_return_and_preserves_angles(self) -> None:
         """Convert JSON null to the standard positive-infinity LaserScan return."""
@@ -187,6 +285,63 @@ class MinecraftModClientTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inconsistent"):
                 driver.inventory_mcp(driver.minecraft_mcp.Inventory_Request())
 
+    def test_select_inventory_item_verifies_main_hand_selection(self) -> None:
+        """Expose the selected glass-bottle stack and whether it moved to hotbar."""
+        message = driver.minecraft_mcp.SelectInventoryItem_Request(
+            item="minecraft:glass_bottle",
+        )
+        result = {
+            "selected": True,
+            "item": "minecraft:glass_bottle",
+            "source_slot": 17,
+            "selected_slot": 3,
+            "selected_count": 4,
+            "moved_to_hotbar": True,
+        }
+        with patch.object(driver.client, "request", return_value=result) as request:
+            response = driver.select_inventory_item_mcp(message)
+        self.assertTrue(response.selected)
+        self.assertEqual(response.item, "minecraft:glass_bottle")
+        self.assertEqual((response.source_slot, response.selected_slot), (17, 3))
+        self.assertEqual(response.selected_count, 4)
+        self.assertTrue(response.moved_to_hotbar)
+        request.assert_called_once_with(
+            {"cmd": "select_inventory_item", "item": "minecraft:glass_bottle"},
+            timeout_sec=max(driver.client.timeout, driver.ACTION_REQUEST_TIMEOUT_SEC),
+        )
+
+    def test_select_inventory_item_rejects_inconsistent_mod_response(self) -> None:
+        """Do not claim a verified hand selection from contradictory slot metadata."""
+        message = driver.minecraft_mcp.SelectInventoryItem_Request(
+            item="minecraft:glass_bottle",
+        )
+        result = {
+            "selected": True,
+            "item": "minecraft:glass_bottle",
+            "source_slot": 17,
+            "selected_slot": 3,
+            "selected_count": 4,
+            "moved_to_hotbar": False,
+        }
+        with patch.object(driver.client, "request", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "inconsistent hotbar"):
+                driver.select_inventory_item_mcp(message)
+
+    def test_select_inventory_item_mod_handles_hotbar_and_main_inventory(self) -> None:
+        """Keep absent-item errors explicit and inventory-to-hotbar swaps native."""
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/main/java/com/robonix/minecraftmod/MinecraftActions.java"
+        ).read_text(encoding="utf-8")
+        method = source[
+            source.index("public CompletableFuture<JsonObject> selectInventoryItem"):
+            source.index("public CompletableFuture<JsonObject> aimAtBlock")
+        ]
+        self.assertIn("player main inventory contains no ", method)
+        self.assertIn("minecraft.gameMode.handlePickItem(sourceSlot)", method)
+        self.assertIn("player.getInventory().selected = sourceSlot", method)
+        self.assertIn("item name is not registered: ", method)
+
     def test_get_state_returns_fresh_minecraft_world_pose(self) -> None:
         """Validate and expose a compact dynamic snapshot without mutation."""
         observation = {
@@ -253,12 +408,76 @@ class MinecraftModClientTest(unittest.TestCase):
             "collect": True,
         })
 
-    def test_aim_at_block_converts_scene_centroid_and_verifies_live_hit(self) -> None:
-        """Convert the selected Scene block centre instead of relying on VLM arithmetic."""
-        message = driver.minecraft_mcp.AimAtBlock_Request(
-            navigation_x=9.5,
-            navigation_y=-7.5,
-            navigation_z=0.5,
+    def test_route_obstacle_uses_opaque_handle_and_clears_one_allowlisted_block(self) -> None:
+        """Keep native coordinates inside the primitive across inspect and clear."""
+        inspect_request = driver.minecraft_mcp.InspectRouteObstacle_Request(
+            recovery_token="recovery-1", max_distance_m=3.0,
+        )
+        inspected = {
+            "found": True,
+            "block_name": "minecraft:dirt",
+            "x": 12,
+            "y": 64,
+            "z": -8,
+            "distance_m": 1.4,
+        }
+        with patch.object(driver.client, "request", return_value=inspected):
+            inspection = driver.inspect_route_obstacle_mcp(inspect_request)
+        self.assertTrue(inspection.found)
+        self.assertTrue(inspection.clearable)
+        self.assertNotIn("12", inspection.detail)
+
+        clear_request = driver.minecraft_mcp.ClearRouteObstacle_Request(
+            obstacle_handle=inspection.obstacle_handle,
+        )
+        results = [
+            {
+                "aimed": True,
+                "actual_block": "minecraft:dirt",
+                "hit_face": "north",
+                "final_yaw_deg": 0.0,
+                "final_pitch_deg": 0.0,
+            },
+            {
+                "block_broken": True,
+                "original_block": "minecraft:dirt",
+                "collected_item": "",
+                "collected_count": 0,
+            },
+        ]
+        with patch.object(driver.client, "request", side_effect=results) as request:
+            cleared = driver.clear_route_obstacle_mcp(clear_request)
+        self.assertTrue(cleared.cleared)
+        self.assertEqual(request.call_args_list[0].args[0]["x"], 12)
+        self.assertNotIn("x", clear_request.to_dict())
+
+    def test_route_obstacle_refuses_non_allowlisted_block(self) -> None:
+        """Report arbitrary blockers but never clear them outside the allowlist."""
+        message = driver.minecraft_mcp.InspectRouteObstacle_Request(
+            recovery_token="recovery-2", max_distance_m=2.0,
+        )
+        result = {
+            "found": True,
+            "block_name": "minecraft:chest",
+            "x": 1,
+            "y": 64,
+            "z": 1,
+            "distance_m": 1.0,
+        }
+        with patch.object(driver.client, "request", return_value=result):
+            inspection = driver.inspect_route_obstacle_mcp(message)
+        self.assertFalse(inspection.clearable)
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            driver.clear_route_obstacle_mcp(
+                driver.minecraft_mcp.ClearRouteObstacle_Request(
+                    obstacle_handle=inspection.obstacle_handle,
+                )
+            )
+
+    def test_aim_at_block_resolves_stable_object_id_and_verifies_live_hit(self) -> None:
+        """Resolve the selected Scene object ID without VLM coordinate arithmetic."""
+        message = driver.minecraft_mcp.AimAtBlockV2_Request(
+            object_id=semantic_target(9, 0, 7),
             expected_block="minecraft:chest",
         )
         result = {
@@ -280,12 +499,22 @@ class MinecraftModClientTest(unittest.TestCase):
             "expected_block": "minecraft:chest",
         })
 
+    def test_object_id_resolves_native_block_position(self) -> None:
+        """Keep the native coordinate lookup entirely inside the primitive."""
+        object_id = semantic_target(44, 0, -10)
+        self.assertEqual(driver.native_block_pos(object_id), (44, 0, -10))
+
+    def test_object_id_rejects_unknown_and_empty_values(self) -> None:
+        """Never infer a BlockPos from unknown or malformed object identity."""
+        with self.assertRaisesRegex(ValueError, "unknown or stale"):
+            driver.native_block_pos("missing:object")
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            driver.native_block_pos("")
+
     def test_aim_at_block_rejects_unverified_mod_result(self) -> None:
         """Reject mismatched blocks, invalid faces, and impossible final pitch."""
-        message = driver.minecraft_mcp.AimAtBlock_Request(
-            navigation_x=2.5,
-            navigation_y=2.5,
-            navigation_z=64.5,
+        message = driver.minecraft_mcp.AimAtBlockV2_Request(
+            object_id=semantic_target(2, 64, -3),
             expected_block="minecraft:chest",
         )
         valid = {
@@ -307,29 +536,25 @@ class MinecraftModClientTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, error):
                     driver.aim_at_block_mcp(message)
 
-    def test_aim_at_block_rejects_nonfinite_scene_centroid(self) -> None:
-        """Do not turn a malformed Scene coordinate into an arbitrary BlockPos."""
-        message = driver.minecraft_mcp.AimAtBlock_Request(
-            navigation_x=float("nan"),
-            navigation_y=-7.5,
-            navigation_z=0.5,
+    def test_aim_at_block_rejects_unknown_object_id(self) -> None:
+        """Do not turn an unknown Scene identity into an arbitrary BlockPos."""
+        message = driver.minecraft_mcp.AimAtBlockV2_Request(
+            object_id="missing:object",
             expected_block="minecraft:crafting_table",
         )
         with patch.object(driver.client, "request") as request:
-            with self.assertRaisesRegex(ValueError, "must be finite"):
+            with self.assertRaisesRegex(ValueError, "unknown or stale"):
                 driver.aim_at_block_mcp(message)
         request.assert_not_called()
 
-    def test_aim_at_block_rejects_robot_or_approach_pose(self) -> None:
-        """Only exact half-block Scene centroids may cross the frame boundary."""
-        message = driver.minecraft_mcp.AimAtBlock_Request(
-            navigation_x=10.401299,
-            navigation_y=-6.178009,
-            navigation_z=0.5,
+    def test_aim_at_block_rejects_empty_object_id(self) -> None:
+        """Require a stable structured-object identity at the boundary."""
+        message = driver.minecraft_mcp.AimAtBlockV2_Request(
+            object_id="",
             expected_block="minecraft:crafting_table",
         )
         with patch.object(driver.client, "request") as request:
-            with self.assertRaisesRegex(ValueError, "exact Scene block-centre"):
+            with self.assertRaisesRegex(ValueError, "non-empty"):
                 driver.aim_at_block_mcp(message)
         request.assert_not_called()
 
@@ -362,32 +587,77 @@ class MinecraftModClientTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unexpected collected item"):
                 driver.break_block_mcp(message)
 
-    def test_deposit_item_requires_verified_exact_count_changes(self) -> None:
-        """Return the synchronized player and chest counts for one dirt transfer."""
-        message = driver.minecraft_mcp.DepositItem_Request(
-            x=2, y=64, z=1, item="minecraft:dirt", count=1,
+    def test_attack_entity_resolves_uuid_and_verifies_kill(self) -> None:
+        """Keep moving-target coordinates out of the native combat request."""
+        object_id = semantic_entity_target()
+        message = driver.minecraft_mcp.AttackEntity_Request(
+            object_id=object_id,
+            expected_entity="minecraft:zombie",
         )
         result = {
-            "transferred_count": 1,
-            "player_count_before": 2,
-            "player_count_after": 1,
-            "container_count_before": 5,
-            "container_count_after": 6,
+            "killed": True,
+            "actual_entity": "minecraft:zombie",
+            "attacks_attempted": 4,
+            "attacks_landed": 3,
+            "bot_health_before": 20.0,
+            "bot_health_after": 16.0,
         }
-        with patch.object(driver.client, "request", return_value=result):
-            response = driver.deposit_item_mcp(message)
-        self.assertEqual(response.transferred_count, 1)
-        self.assertEqual((response.player_count_after, response.container_count_after), (1, 6))
+        with patch.object(driver.client, "request", return_value=result) as request:
+            response = driver.attack_entity_mcp(message)
+        self.assertTrue(response.killed)
+        self.assertEqual(response.object_id, object_id)
+        self.assertEqual(response.attacks_landed, 3)
+        self.assertEqual(request.call_args.args[0], {
+            "cmd": "attack_entity",
+            "entity_uuid": "12345678-1234-5678-1234-567812345678",
+            "expected_entity": "minecraft:zombie",
+        })
 
-        result["container_count_after"] = 5
+    def test_attack_entity_rejects_unknown_and_non_zombie_targets(self) -> None:
+        """Reject stale identity and every non-whitelisted entity before mutation."""
+        unknown = driver.minecraft_mcp.AttackEntity_Request(
+            object_id="missing:entity",
+            expected_entity="minecraft:zombie",
+        )
+        skeleton = driver.minecraft_mcp.AttackEntity_Request(
+            object_id=semantic_entity_target(label="minecraft:skeleton"),
+            expected_entity="minecraft:skeleton",
+        )
+        with patch.object(driver.client, "request") as request:
+            with self.assertRaisesRegex(ValueError, "unknown or stale"):
+                driver.attack_entity_mcp(unknown)
+            with self.assertRaisesRegex(ValueError, "must be minecraft:zombie"):
+                driver.attack_entity_mcp(skeleton)
+        request.assert_not_called()
+
+    def test_deposit_item_requires_exact_requested_count_changes(self) -> None:
+        """Forward any registry-shaped item ID and verify both requested deltas."""
+        message = driver.minecraft_mcp.DepositItemV2_Request(
+            object_id=semantic_target(), item="minecraft:glass_bottle", count=3,
+        )
+        result = {
+            "transferred_count": 3,
+            "player_count_before": 5,
+            "player_count_after": 2,
+            "container_count_before": 5,
+            "container_count_after": 8,
+        }
+        with patch.object(driver.client, "request", return_value=result) as request:
+            response = driver.deposit_item_mcp(message)
+        self.assertEqual(response.transferred_count, 3)
+        self.assertEqual((response.player_count_after, response.container_count_after), (2, 8))
+        self.assertEqual(request.call_args.args[0]["item"], "minecraft:glass_bottle")
+        self.assertEqual(request.call_args.args[0]["count"], 3)
+
+        result["container_count_after"] = 7
         with patch.object(driver.client, "request", return_value=result):
             with self.assertRaisesRegex(RuntimeError, "container counts"):
                 driver.deposit_item_mcp(message)
 
-    def test_deposit_item_accepts_one_crafting_table(self) -> None:
-        """Forward a supported crafting table deposit without changing its item name."""
-        message = driver.minecraft_mcp.DepositItem_Request(
-            x=2, y=64, z=1, item="minecraft:crafting_table", count=1,
+    def test_deposit_item_accepts_other_registry_shaped_item(self) -> None:
+        """Do not retain the old dirt and crafting-table whitelist in Python."""
+        message = driver.minecraft_mcp.DepositItemV2_Request(
+            object_id=semantic_target(), item="minecraft:stone", count=1,
         )
         result = {
             "transferred_count": 1,
@@ -399,17 +669,266 @@ class MinecraftModClientTest(unittest.TestCase):
         with patch.object(driver.client, "request", return_value=result) as request:
             response = driver.deposit_item_mcp(message)
         self.assertEqual(response.container_count_after, 1)
-        self.assertEqual(request.call_args.args[0]["item"], "minecraft:crafting_table")
+        self.assertEqual(request.call_args.args[0]["item"], "minecraft:stone")
 
-    def test_deposit_item_rejects_unsupported_item(self) -> None:
-        """Reject items outside the confirmed dirt and crafting-table set."""
-        message = driver.minecraft_mcp.DepositItem_Request(
-            item="minecraft:stone", count=1,
+    def test_withdraw_item_requires_exact_requested_count_changes(self) -> None:
+        """Forward an arbitrary registered item and verify both count deltas."""
+        message = driver.minecraft_mcp.WithdrawItemV2_Request(
+            object_id=semantic_target(), item="minecraft:iron_ingot", count=3,
+        )
+        result = {
+            "transferred_count": 3,
+            "player_count_before": 2,
+            "player_count_after": 5,
+            "container_count_before": 10,
+            "container_count_after": 7,
+        }
+        with patch.object(driver.client, "request", return_value=result) as request:
+            response = driver.withdraw_item_mcp(message)
+        self.assertEqual(response.transferred_count, 3)
+        self.assertEqual((response.player_count_after, response.container_count_after), (5, 7))
+        self.assertEqual(
+            request.call_args.args[0],
+            {
+                "cmd": "withdraw_item",
+                "x": 2,
+                "y": 64,
+                "z": 1,
+                "item": "minecraft:iron_ingot",
+                "count": 3,
+            },
+        )
+
+        result["container_count_after"] = 8
+        with patch.object(driver.client, "request", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "container counts"):
+                driver.withdraw_item_mcp(message)
+
+    def test_withdraw_item_rejects_zero_before_request(self) -> None:
+        """Require a positive quantity at the capability boundary."""
+        message = driver.minecraft_mcp.WithdrawItemV2_Request(
+            item="minecraft:iron_ingot", count=0,
         )
         with patch.object(driver.client, "request") as request:
-            with self.assertRaisesRegex(ValueError, "minecraft:crafting_table"):
-                driver.deposit_item_mcp(message)
+            with self.assertRaisesRegex(ValueError, "count"):
+                driver.withdraw_item_mcp(message)
         request.assert_not_called()
+
+    def test_withdraw_item_preserves_absent_item_error(self) -> None:
+        """Expose the Mod's actionable no-item error without rewriting it."""
+        message = driver.minecraft_mcp.WithdrawItemV2_Request(
+            object_id=semantic_target(), item="minecraft:diamond", count=1,
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            side_effect=RuntimeError("chest contains no minecraft:diamond"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "chest contains no minecraft:diamond",
+            ):
+                driver.withdraw_item_mcp(message)
+
+    def test_legacy_withdraw_contract_forbids_scene_coordinate_conversion(self) -> None:
+        """Keep item aliases while directing Scene-driven callers to v2."""
+        contract = (
+            Path(__file__).resolve().parents[1]
+            / "capabilities"
+            / "minecraft"
+            / "withdraw_item.v1.toml"
+        )
+        with contract.open("rb") as stream:
+            description = tomllib.load(stream)["contract"]["description"]
+        self.assertIn("minecraft:bread", description)
+        self.assertIn("minecraft:potion", description)
+        self.assertIn("minecraft:water_bottle is not registered", description)
+        self.assertIn("must never be derived from Scene coordinates", description)
+        self.assertIn("v2 with a stable object_id", description)
+
+    def test_withdraw_mod_checks_availability_before_clicking_items(self) -> None:
+        """Keep absent and insufficient-item failures non-mutating."""
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "main"
+            / "java"
+            / "com"
+            / "robonix"
+            / "minecraftmod"
+            / "MinecraftActions.java"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        withdraw = source[
+            source.index("private void tickWithdraw"):
+            source.index(
+                "private static void pickNextWithdrawSource",
+                source.index("private void tickWithdraw"),
+            )
+        ]
+        self.assertLess(
+            withdraw.index("chest contains no "),
+            withdraw.index("pickNextWithdrawSource"),
+        )
+        self.assertIn("chest contains only ", withdraw)
+        self.assertIn("player main inventory can hold only ", withdraw)
+
+    def test_withdraw_requires_live_crosshair_on_requested_chest(self) -> None:
+        """Keep a reachable crosshair miss distinct from an out-of-reach target."""
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "main"
+            / "java"
+            / "com"
+            / "robonix"
+            / "minecraftmod"
+            / "MinecraftActions.java"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        withdraw = source[
+            source.index("public CompletableFuture<JsonObject> withdrawItem"):
+            source.index(
+                "public CompletableFuture<JsonObject> fillWaterBottles",
+                source.index("public CompletableFuture<JsonObject> withdrawItem"),
+            )
+        ]
+        validation = source[
+            source.index("private static BlockHitResult validateDepositTarget"):
+            source.index(
+                "private static BlockHitResult validateCauldronTarget",
+                source.index("private static BlockHitResult validateDepositTarget"),
+            )
+        ]
+        self.assertIn("validateDepositTarget", withdraw)
+        self.assertIn("target block is outside interaction reach", validation)
+        self.assertIn("crosshair is not aimed at target chest", validation)
+        self.assertLess(
+            validation.index("target block is outside interaction reach"),
+            validation.index("crosshair is not aimed at target chest"),
+        )
+
+    def test_fill_water_bottles_verifies_bottle_and_level_deltas(self) -> None:
+        """Return only a synchronized exact two-bottle fill."""
+        message = driver.minecraft_mcp.FillWaterBottlesV2_Request(
+            object_id=semantic_target(), count=2,
+        )
+        result = {
+            "filled_count": 2,
+            "empty_bottles_before": 3,
+            "empty_bottles_after": 1,
+            "water_bottles_before": 0,
+            "water_bottles_after": 2,
+            "cauldron_level_before": 3,
+            "cauldron_level_after": 1,
+        }
+        with patch.object(driver.client, "request", return_value=result) as request:
+            response = driver.fill_water_bottles_mcp(message)
+        self.assertEqual(response.filled_count, 2)
+        self.assertEqual(response.water_bottles_after, 2)
+        self.assertEqual(response.cauldron_level_after, 1)
+        self.assertEqual(
+            request.call_args.args[0],
+            {"cmd": "fill_water_bottles", "x": 2, "y": 64, "z": 1, "count": 2},
+        )
+
+        result["water_bottles_after"] = 1
+        with patch.object(driver.client, "request", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "water bottle counts"):
+                driver.fill_water_bottles_mcp(message)
+
+    def test_fill_water_bottles_rejects_impossible_count_before_request(self) -> None:
+        """A vanilla water cauldron can supply at most three bottles."""
+        message = driver.minecraft_mcp.FillWaterBottlesV2_Request(count=4)
+        with patch.object(driver.client, "request") as request:
+            with self.assertRaisesRegex(ValueError, "count"):
+                driver.fill_water_bottles_mcp(message)
+        request.assert_not_called()
+
+    def test_fill_water_bottles_preserves_missing_bottle_error(self) -> None:
+        """Expose an actionable empty-bottle precondition failure."""
+        message = driver.minecraft_mcp.FillWaterBottlesV2_Request(
+            object_id=semantic_target(), count=1,
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            side_effect=RuntimeError(
+                "player main inventory contains no minecraft:glass_bottle"
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "contains no minecraft:glass_bottle"):
+                driver.fill_water_bottles_mcp(message)
+
+    def test_fill_mod_checks_all_preconditions_before_cauldron_use(self) -> None:
+        """Keep water-level, bottle-count, and capacity failures non-mutating."""
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "main"
+            / "java"
+            / "com"
+            / "robonix"
+            / "minecraftmod"
+            / "MinecraftActions.java"
+        )
+        source = source_path.read_text(encoding="utf-8")
+        setup = source[
+            source.index("public CompletableFuture<JsonObject> fillWaterBottles"):
+            source.index(
+                "public void onClientTick",
+                source.index("public CompletableFuture<JsonObject> fillWaterBottles"),
+            )
+        ]
+        self.assertIn("Blocks.WATER_CAULDRON", setup)
+        self.assertIn("LayeredCauldronBlock.LEVEL", setup)
+        self.assertIn("minecraft:glass_bottle", setup)
+        self.assertIn("mainInventoryEmptySlots", setup)
+        self.assertNotIn("useItemOn", setup)
+
+    def test_target_identity_docs_forbid_coordinate_guessing(self) -> None:
+        """Keep stable target identity visible to Pilot in every v2 action."""
+        package_root = Path(__file__).resolve().parents[1]
+        capability_doc = (package_root / "CAPABILITY.md").read_text(encoding="utf-8")
+        self.assertIn("robonix/system/scene/list_objects", capability_doc)
+        self.assertIn("copy that stable `id`", capability_doc)
+        self.assertIn("reports the player's position, not", capability_doc)
+        self.assertIn("Scene coordinates and `goal_near` poses", capability_doc)
+
+        for name in (
+            "aim_at_block.v2.toml",
+            "deposit_item.v2.toml",
+            "withdraw_item.v2.toml",
+            "fill_water_bottles.v2.toml",
+        ):
+            with (package_root / "capabilities" / "minecraft" / name).open("rb") as stream:
+                description = tomllib.load(stream)["contract"]["description"]
+            self.assertIn("robonix/system/scene/list_objects", description, name)
+            self.assertIn("stable id", description, name)
+            self.assertIn("minecraft/get_state", description, name)
+            self.assertIn("scene coordinates", description.lower(), name)
+            self.assertIn("unknown or stale", description.lower(), name)
+
+    def test_live_mcp_descriptions_require_scene_target_provenance(self) -> None:
+        """Expose coordinate-source constraints in the descriptions Pilot sees."""
+        for operation in (
+            driver.aim_at_block_mcp,
+            driver.deposit_item_mcp,
+            driver.withdraw_item_mcp,
+            driver.fill_water_bottles_mcp,
+        ):
+            description = " ".join((operation.__doc__ or "").split())
+            self.assertIn("MUST call ``scene_list_objects``", description)
+            self.assertIn("stable ``id``", description)
+            self.assertIn("minecraft_get_state", description)
+            self.assertIn("cannot supply this ID", description)
+            self.assertIn("object_id", description)
+
+        state_description = " ".join((driver.get_state_mcp.__doc__ or "").split())
+        self.assertIn("belongs to the Bot/player", state_description)
+        self.assertIn("MUST NOT copy or adapt", state_description)
+        self.assertIn("MUST call ``scene_list_objects``", state_description)
+        self.assertIn("Never infer a target from the Bot's position", state_description)
 
     def test_action_timeout_remains_longer_than_mod_deadline(self) -> None:
         """Override a short general timeout for timing-sensitive item actions."""
@@ -569,10 +1088,85 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertEqual(payload["frame_id"], driver.odom_frame_id)
         self.assertEqual(payload["objects"][0]["label"], "minecraft:crafting_table")
         self.assertEqual(
+            payload["objects"][0]["id"],
+            f"{driver.minecraft_mod.id}/minecraft:overworld@4,64,3",
+        )
+        self.assertEqual(
             (payload["objects"][0]["x"], payload["objects"][0]["y"], payload["objects"][0]["z"]),
             (4.5, -3.5, 64.5),
         )
         self.assertEqual(payload["objects"][0]["last_seen_unix"], 1_699_999_999.0)
+        self.assertEqual(
+            tuple(payload["objects"][0][name] for name in ("size_x", "size_y", "size_z")),
+            (1.0, 1.0, 1.0),
+        )
+        self.assertEqual(
+            driver.native_block_pos(
+                f"{driver.minecraft_mod.id}/minecraft:overworld@4,64,3",
+            ),
+            (4, 64, 3),
+        )
+
+    def test_semantic_objects_payload_tracks_moving_zombie_by_uuid(self) -> None:
+        """Publish entity centre and geometry while retaining only native UUID identity."""
+        entity_uuid = "12345678-1234-5678-1234-567812345678"
+        payload = semantic_objects_payload({
+            "timestamp": "2023-11-14T22:13:20.123Z",
+            "semanticBlocks": [],
+            "nearbyEntities": [{
+                "id": f"entity:minecraft:overworld@{entity_uuid}",
+                "uuid": entity_uuid,
+                "name": "minecraft:zombie",
+                "position": {"x": 4.0, "y": 65.0, "z": 3.0},
+                "yaw": 0.0,
+                "width": 0.6,
+                "height": 1.95,
+                "depth": 0.6,
+                "lastSeen": "2023-11-14T22:13:20.123Z",
+            }],
+        })
+        obj = payload["objects"][0]
+        self.assertEqual(obj["label"], "minecraft:zombie")
+        self.assertEqual((obj["x"], obj["y"], obj["z"]), (4.0, -3.0, 65.0))
+        self.assertAlmostEqual(obj["yaw"], math.pi / 2.0)
+        self.assertEqual(
+            (obj["size_x"], obj["size_y"], obj["size_z"]),
+            (0.6, 0.6, 1.95),
+        )
+        self.assertEqual(
+            driver.native_entity_target(obj["id"], "minecraft:zombie"),
+            (entity_uuid, "minecraft:zombie"),
+        )
+
+        semantic_objects_payload({
+            "timestamp": "2023-11-14T22:13:21.123Z",
+            "semanticBlocks": [],
+            "nearbyEntities": [],
+        })
+        with self.assertRaisesRegex(ValueError, "unknown or stale"):
+            driver.native_entity_target(obj["id"], "minecraft:zombie")
+
+    def test_mod_combat_is_uuid_bound_bounded_and_zombie_only(self) -> None:
+        """Keep combat policy in the Minecraft Mod rather than Scene."""
+        root = Path(__file__).resolve().parents[1]
+        actions = (
+            root / "src/main/java/com/robonix/minecraftmod/MinecraftActions.java"
+        ).read_text(encoding="utf-8")
+        observation = (
+            root / "src/main/java/com/robonix/minecraftmod/ObservationFactory.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn("UUID.fromString(entityUuid)", actions)
+        self.assertIn("MAX_ATTACK_ATTEMPTS = 30", actions)
+        self.assertIn("MIN_COMBAT_HEALTH = 4.0F", actions)
+        self.assertIn("FULL_ATTACK_STRENGTH = 0.999F", actions)
+        self.assertIn("MIN_ATTACK_INTERVAL_NANOS = 650_000_000L", actions)
+        self.assertIn("getAttackStrengthScale(0.0F) < FULL_ATTACK_STRENGTH", actions)
+        self.assertIn("living.hurtTime > 0", actions)
+        self.assertIn("!action.attackIntervalElapsed(now)", actions)
+        self.assertIn("minecraft.gameMode.attack(player, entity)", actions)
+        self.assertIn("ATTACKABLE_ENTITIES = Set.of(ZOMBIE)", actions)
+        self.assertIn("SEMANTIC_ENTITY_WHITELIST = Set.of", observation)
+        self.assertIn('"minecraft:zombie"', observation)
 
     def test_semantic_whitelist_distinguishes_empty_and_water_cauldrons(self) -> None:
         """Keep both cauldron block-state registry names visible to Scene."""

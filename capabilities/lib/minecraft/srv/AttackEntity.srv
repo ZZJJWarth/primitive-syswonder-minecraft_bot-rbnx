@@ -1,0 +1,10 @@
+string object_id
+string expected_entity
+---
+bool killed
+string object_id
+string actual_entity
+uint32 attacks_attempted
+uint32 attacks_landed
+float32 bot_health_before
+float32 bot_health_after

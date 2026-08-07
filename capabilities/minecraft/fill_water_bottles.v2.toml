@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/minecraft/fill_water_bottles"
+version = "2"
+kind    = "primitive"
+idl     = "minecraft/srv/FillWaterBottlesV2.srv"
+description = "Fill exactly count minecraft:glass_bottle items from a visible reachable minecraft:water_cauldron. First call robonix/system/scene/list_objects and copy the selected cauldron's stable id unchanged into object_id for both aim_at_block and this operation; the primitive resolves it to native BlockPos. Never derive a target from Scene coordinates, a camera image, memory, goal_near, or minecraft/get_state. Unknown or stale IDs require a fresh Scene query."
+
+[mode]
+type = "rpc"

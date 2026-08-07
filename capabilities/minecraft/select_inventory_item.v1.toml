@@ -1,0 +1,10 @@
+# Select one exact main-inventory item into the player's main hand.
+[contract]
+id      = "robonix/primitive/minecraft/select_inventory_item"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/SelectInventoryItem.srv"
+description = "Select an exact registered Minecraft item into the main hand. item must be a registry name such as minecraft:glass_bottle. The provider selects the largest matching hotbar stack, or swaps the largest matching main-inventory stack into the current hotbar slot and verifies synchronization. If the item is absent it returns 'player main inventory contains no <item>'; an invalid registry name returns 'item name is not registered: <item>'. Use this after withdrawing minecraft:glass_bottle and before filling bottles when an explicit verified hand-selection step is desired."
+
+[mode]
+type = "rpc"

@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/minecraft/withdraw_item"
+version = "2"
+kind    = "primitive"
+idl     = "minecraft/srv/WithdrawItemV2.srv"
+description = "Withdraw exactly count items from a visible reachable chest. First call robonix/system/scene/list_objects and copy the selected chest's stable id unchanged into object_id; the primitive resolves it to native BlockPos. Never derive a target from Scene coordinates, a camera image, memory, goal_near, or minecraft/get_state. Unknown or stale IDs require a fresh Scene query. Exact registered item names, quantities, reach, crosshair, and synchronization are validated explicitly."
+
+[mode]
+type = "rpc"

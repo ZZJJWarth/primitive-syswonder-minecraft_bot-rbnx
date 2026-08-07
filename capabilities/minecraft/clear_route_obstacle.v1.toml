@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/minecraft/clear_route_obstacle"
+version = "1"
+kind = "primitive"
+idl = "minecraft/srv/ClearRouteObstacle.srv"
+description = "Clear exactly one recently inspected, allowlisted route obstacle by opaque handle after navigation has stopped. The primitive revalidates handle age, block identity, reach, and live world state. After cleared=true, call navigation/synchronize_environment with the same PATH_BLOCKED recovery token, require synchronized=true, then call assess_detour for the original goal. If synchronization succeeds but assess_detour returns NO_ROUTE, inspect again with the same recovery token to discover the next blocking block; clear and reassess at most three blocks. Stop clearing immediately when a route is available."
+
+[mode]
+type = "rpc"

@@ -1,0 +1,12 @@
+[contract]
+id      = "robonix/primitive/minecraft/aim_at_block"
+version = "2"
+kind    = "primitive"
+idl     = "minecraft/srv/AimAtBlockV2.srv"
+description = "Aim at one visible reachable Minecraft block. First call robonix/system/scene/list_objects, select the intended object by label, and copy its stable id unchanged into object_id. The primitive resolves that ID to its native BlockPos. Camera images, memory, scene coordinates, goal_near poses, and minecraft/get_state cannot provide or replace the object ID. If the ID is unknown or stale, query Scene again instead of guessing coordinates."
+
+[mode]
+type = "rpc"
+
+[semantics]
+user_invocable = true

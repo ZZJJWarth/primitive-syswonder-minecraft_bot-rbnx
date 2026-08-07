@@ -1,0 +1,11 @@
+int32 x
+int32 y
+int32 z
+string item
+uint32 count
+---
+uint32 transferred_count
+uint32 player_count_before
+uint32 player_count_after
+uint32 container_count_before
+uint32 container_count_after

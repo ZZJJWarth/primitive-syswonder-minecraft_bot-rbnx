@@ -1,0 +1,10 @@
+string object_id
+uint32 count
+---
+uint32 filled_count
+uint32 empty_bottles_before
+uint32 empty_bottles_after
+uint32 water_bottles_before
+uint32 water_bottles_after
+uint32 cauldron_level_before
+uint32 cauldron_level_after

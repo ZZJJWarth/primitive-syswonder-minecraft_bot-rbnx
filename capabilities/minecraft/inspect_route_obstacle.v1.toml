@@ -1,0 +1,9 @@
+[contract]
+id = "robonix/primitive/minecraft/inspect_route_obstacle"
+version = "1"
+kind = "primitive"
+idl = "minecraft/srv/InspectRouteObstacle.srv"
+description = "Primary Minecraft recovery step after PATH_BLOCKED: call this before assess_detour, synchronize_environment, or Explore. Copy the opaque recovery token from PATH_BLOCKED. max_distance_m must be 0.5 through 4.5; use 4.5 normally. Returns one short-lived obstacle handle; native Minecraft coordinates are never exposed. If it is clearable, clear it before synchronizing Navigation. After clearing and synchronizing perception, call this again with the same token only when assess_detour still reports NO_ROUTE, up to a total of three cleared blocks."
+
+[mode]
+type = "rpc"
