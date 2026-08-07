@@ -1,9 +1,0 @@
-[contract]
-id = "robonix/primitive/minecraft/inspect_route_obstacle"
-version = "1"
-kind = "primitive"
-idl = "minecraft/srv/InspectRouteObstacle.srv"
-description = "Compatibility fallback only when PATH_BLOCKED has no transformed planner path. If a minecraft_odom planner path is present, use inspect_route_path instead. Copy the opaque recovery token from PATH_BLOCKED. max_distance_m must be 0.5 through 4.5; use 4.5 normally. Returns a 90-second opaque obstacle handle; native Minecraft coordinates are never exposed."
-
-[mode]
-type = "rpc"

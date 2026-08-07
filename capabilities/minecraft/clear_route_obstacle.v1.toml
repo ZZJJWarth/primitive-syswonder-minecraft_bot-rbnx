@@ -1,9 +1,0 @@
-[contract]
-id = "robonix/primitive/minecraft/clear_route_obstacle"
-version = "1"
-kind = "primitive"
-idl = "minecraft/srv/ClearRouteObstacle.srv"
-description = "Clear exactly one recently inspected, allowlisted route obstacle by opaque handle after navigation has stopped. The primitive revalidates handle age, block identity, reach, and live world state. After cleared=true, wait for Navigation perception to update and replan the original goal. For a planner path, use clear_route_path to clear the bounded dirt candidates returned by inspect_route_path."
-
-[mode]
-type = "rpc"
