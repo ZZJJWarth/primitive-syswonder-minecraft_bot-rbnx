@@ -3,7 +3,7 @@ id = "robonix/primitive/minecraft/inspect_route_obstacle"
 version = "1"
 kind = "primitive"
 idl = "minecraft/srv/InspectRouteObstacle.srv"
-description = "Compatibility recovery step after PATH_BLOCKED for a short forward corridor. Copy the opaque recovery token from PATH_BLOCKED. max_distance_m must be 0.5 through 4.5; use 4.5 normally. Returns one short-lived obstacle handle; native Minecraft coordinates are never exposed. For a planner path, use inspect_route_path instead so the complete footprint corridor is checked."
+description = "Compatibility fallback only when PATH_BLOCKED has no transformed planner path. If a minecraft_odom planner path is present, use inspect_route_path instead. Copy the opaque recovery token from PATH_BLOCKED. max_distance_m must be 0.5 through 4.5; use 4.5 normally. Returns a 90-second opaque obstacle handle; native Minecraft coordinates are never exposed."
 
 [mode]
 type = "rpc"

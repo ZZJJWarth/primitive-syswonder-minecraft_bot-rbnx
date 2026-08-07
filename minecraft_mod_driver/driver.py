@@ -1018,7 +1018,11 @@ def stop_cmd_vel_bridge() -> bool:
 REGISTRY_NAME = re.compile(r"^[a-z0-9_.-]+:[a-z0-9_./-]+$")
 ACTION_REQUEST_TIMEOUT_SEC = 30.0
 BREAKABLE_BLOCKS = frozenset(("minecraft:dirt", "minecraft:crafting_table"))
-ROUTE_OBSTACLE_HANDLE_TTL_SEC = 15.0
+# Recovery calls are planned in separate Pilot rounds.  Keep the opaque
+# inspection handle long enough for that round-trip (including history
+# compaction and model latency), while still expiring it promptly if a caller
+# abandons recovery.
+ROUTE_OBSTACLE_HANDLE_TTL_SEC = 90.0
 
 
 def exact_int(value: Any, name: str, minimum: int, maximum: int) -> int:

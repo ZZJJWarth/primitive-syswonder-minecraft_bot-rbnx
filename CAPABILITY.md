@@ -114,11 +114,11 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     former block centre, and waits for the matching synchronized inventory
     count to increase.
 - `robonix/primitive/minecraft/inspect_route_obstacle`
-  - Use only after navigation emits `PATH_BLOCKED` and has stopped. It inspects
-    a bounded forward corridor and returns an opaque 15-second handle without
-    publishing native Minecraft coordinates.
-  - This is the first Minecraft recovery call after `PATH_BLOCKED`; do not
-    assess, synchronize, or start Explore before inspecting the obstruction.
+  - Compatibility fallback only when `PATH_BLOCKED` has no transformed
+    planner path. If the event contains a `minecraft_odom` planner path, use
+    `inspect_route_path` instead; it checks the complete footprint corridor.
+    This fallback returns an opaque 90-second handle without publishing native
+    Minecraft coordinates.
 - `robonix/primitive/minecraft/clear_route_obstacle`
   - Consumes one obstacle handle and revalidates its age, exact live block,
     visibility, and reach. Only `minecraft:dirt` and
