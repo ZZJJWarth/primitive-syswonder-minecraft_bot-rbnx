@@ -1,6 +1,5 @@
 # Clear every recently inspected dirt block in one bounded route corridor.
 string inspection_handle
-uint32 max_blocks
 ---
 bool cleared
 uint32 cleared_count

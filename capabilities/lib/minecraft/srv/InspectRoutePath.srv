@@ -2,10 +2,6 @@
 string recovery_token
 float64[] navigation_x  # minecraft_odom east coordinates
 float64[] navigation_y  # minecraft_odom north coordinates; native z = -navigation_y
-int32 body_y             # first body block; support below this level is never cleared
-float64 half_width_m
-float64 sample_spacing_m
-uint32 max_blocks
 ---
 bool found
 string inspection_handle

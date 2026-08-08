@@ -29,6 +29,7 @@ from minecraft_mod_driver.driver import (
     configured_frequency,
     configured_lidar_range,
     configured_lidar_ray_count,
+    configured_route_inspection,
     depth_view_to_image,
     execute_move_command,
     observation_pose,
@@ -480,10 +481,6 @@ class MinecraftModClientTest(unittest.TestCase):
             recovery_token="recovery-path",
             navigation_x=[1.0, 2.0],
             navigation_y=[-4.0, -4.0],
-            body_y=64,
-            half_width_m=0.35,
-            sample_spacing_m=0.25,
-            max_blocks=16,
         )
         inspected = {
             "found": True,
@@ -503,14 +500,22 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertEqual(inspection.dirt_count, 2)
         self.assertEqual(inspection.other_count, 1)
         self.assertNotIn("1,64,4", inspection.detail)
+        self.assertEqual(set(message.to_dict()), {
+            "recovery_token", "navigation_x", "navigation_y",
+        })
         sent = request.call_args.args[0]
         self.assertEqual(sent["cmd"], "inspect_route_path")
         self.assertEqual(sent["navigation_x"], [1.0, 2.0])
+        self.assertEqual(sent["half_width"], driver.route_inspection_half_width_m)
+        self.assertEqual(sent["sample_spacing"], driver.route_inspection_sample_spacing_m)
+        self.assertEqual(sent["max_blocks"], driver.route_inspection_max_blocks)
 
         clear = driver.minecraft_mcp.ClearRoutePath_Request(
             inspection_handle=inspection.inspection_handle,
-            max_blocks=16,
         )
+        self.assertEqual(clear.to_dict(), {
+            "inspection_handle": inspection.inspection_handle,
+        })
         with patch.object(
             driver.client,
             "request",
@@ -1264,6 +1269,24 @@ class MinecraftModClientTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     configured_eye_height({"eye_height": value})
+
+    def test_route_inspection_configuration_is_system_owned_and_bounded(self) -> None:
+        """Load corridor geometry from provider config and reject unsafe values."""
+        self.assertEqual(configured_route_inspection({}), (1.5, 0.25, 64))
+        self.assertEqual(configured_route_inspection({
+            "route_inspection_half_width_m": 0.5,
+            "route_inspection_sample_spacing_m": 0.1,
+            "route_inspection_max_blocks": 32,
+        }), (0.5, 0.1, 32))
+        invalid = (
+            {"route_inspection_half_width_m": 1.6},
+            {"route_inspection_sample_spacing_m": 0.0},
+            {"route_inspection_max_blocks": True},
+            {"route_inspection_max_blocks": 256.5},
+        )
+        for config in invalid:
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                configured_route_inspection(config)
 
     def test_camera_stream_failure_does_not_suppress_depth(self) -> None:
         """Publish depth even when the independent RGB conversion fails."""

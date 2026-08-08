@@ -115,16 +115,17 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     count to increase.
 - `robonix/primitive/minecraft/inspect_route_path`
   - Accepts a bounded sequence of planar points already transformed into
-    `minecraft_odom`, the first body-block `body_y`, and the robot footprint
-    half-width plus padding. The Mod samples the path, checks the two body
-    layers across the full width, and returns an opaque handle for the exact
-    dirt candidates plus a count of non-clearable collision blocks.
+    `minecraft_odom`. The provider applies its configured footprint half-width,
+    sampling interval, and obstacle limit; the Mod derives the first body layer
+    from the live player position. It checks both body layers across the full
+    width and returns an opaque handle for the exact dirt candidates plus a
+    count of non-clearable collision blocks.
   - A planner snapshot may retain the route prefix already traversed by the
     robot. The Mod aligns the live player to the nearest path segment, rejects
     the request only when the entire route is more than two metres away, and
     scans forward from that aligned segment instead of requiring the original
     first point to remain near the player.
-  - It never checks or clears the support block below `body_y`. Navigation
+  - It never checks or clears the support block below the live body layer. Navigation
     frame points must be transformed explicitly; `map` coordinates and raw
     Scene coordinates are rejected by the caller before this primitive.
 - `robonix/primitive/minecraft/clear_route_path`
@@ -133,8 +134,8 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     Non-dirt blocks are reported and never changed. The handle is consumed even
     when a target changes, so callers must inspect a fresh path after any
     partial or failed clear.
-  - Stop as soon as a route exists and clear no more than the caller's bounded
-    `max_blocks` per recovery attempt.
+  - Stop as soon as a route exists and clear no more than the provider's
+    configured obstacle limit per recovery attempt.
 - `robonix/primitive/minecraft/attack_entity`
   - Resolves one Scene-selected `minecraft:zombie` ID to its native Entity UUID
     and owns the local combat loop. It tracks the moving target, approaches

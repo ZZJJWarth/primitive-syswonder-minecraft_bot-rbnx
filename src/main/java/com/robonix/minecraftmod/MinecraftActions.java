@@ -281,7 +281,6 @@ public final class MinecraftActions implements AutoCloseable {
     public CompletableFuture<JsonObject> inspectRoutePath(
             double[] navigationX,
             double[] navigationY,
-            int bodyY,
             double halfWidth,
             double sampleSpacing,
             int maxBlocks
@@ -309,11 +308,7 @@ public final class MinecraftActions implements AutoCloseable {
             }
             Minecraft minecraft = Minecraft.getInstance();
             LocalPlayer player = requirePlayer(minecraft);
-            int requestedBodyY = bodyY;
             int playerBodyY = (int) Math.floor(player.getY());
-            // Recovery starts at the live player pose.  If the planner model
-            // supplied a stale height, use the actual first body layer so a
-            // ground-level dirt block is not silently skipped.
             int effectiveBodyY = playerBodyY;
             double playerNavigationX = player.getX();
             double playerNavigationY = -player.getZ();
@@ -354,7 +349,6 @@ public final class MinecraftActions implements AutoCloseable {
                 response.add("dirt_blocks", new JsonArray());
                 response.add("other_blocks", new JsonArray());
                 response.addProperty("body_y", effectiveBodyY);
-                response.addProperty("requested_body_y", requestedBodyY);
                 response.addProperty("player_body_y", playerBodyY);
                 response.addProperty("player_x", player.getX());
                 response.addProperty("player_z", player.getZ());
@@ -427,7 +421,6 @@ public final class MinecraftActions implements AutoCloseable {
             response.add("dirt_blocks", blockArray(dirt));
             response.add("other_blocks", blockArray(other));
             response.addProperty("body_y", effectiveBodyY);
-            response.addProperty("requested_body_y", requestedBodyY);
             response.addProperty("player_body_y", playerBodyY);
             response.addProperty("player_x", player.getX());
             response.addProperty("player_z", player.getZ());

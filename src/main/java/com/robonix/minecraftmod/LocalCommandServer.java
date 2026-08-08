@@ -181,7 +181,6 @@ public final class LocalCommandServer implements AutoCloseable {
             case "inspect_route_path" -> actions.inspectRoutePath(
                     requiredDoubleArray(request, "navigation_x"),
                     requiredDoubleArray(request, "navigation_y"),
-                    requiredInt(request, "body_y"),
                     request.has("half_width") ? request.get("half_width").getAsDouble() : 0.35,
                     request.has("sample_spacing") ? request.get("sample_spacing").getAsDouble() : 0.25,
                     request.has("max_blocks") ? requiredInt(request, "max_blocks") : 64);

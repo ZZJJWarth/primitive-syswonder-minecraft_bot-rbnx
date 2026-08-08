@@ -121,6 +121,9 @@ cmd_vel_command_duration_sec = 0.25
 cmd_vel_timeout_sec = 0.5
 cmd_vel_max_linear = 1.2
 cmd_vel_max_angular = 1.0
+route_inspection_half_width_m = 1.5
+route_inspection_sample_spacing_m = 0.25
+route_inspection_max_blocks = 64
 
 
 class MinecraftModClient:
@@ -702,6 +705,23 @@ def configured_eye_height(config: dict[str, Any]) -> float:
     if not math.isfinite(value) or not 0.0 <= value <= 3.0:
         raise ValueError("eye_height must be finite and from 0 through 3")
     return value
+
+
+def configured_route_inspection(config: dict[str, Any]) -> tuple[float, float, int]:
+    """Validate the system-owned route corridor geometry and safety bound."""
+    half_width = float(config.get("route_inspection_half_width_m", 1.5))
+    sample_spacing = float(config.get("route_inspection_sample_spacing_m", 0.25))
+    raw_max_blocks = config.get("route_inspection_max_blocks", 64)
+    if not math.isfinite(half_width) or not 0.30 <= half_width <= 1.5:
+        raise ValueError("route_inspection_half_width_m must be from 0.30 through 1.5")
+    if not math.isfinite(sample_spacing) or not 0.1 <= sample_spacing <= 1.0:
+        raise ValueError("route_inspection_sample_spacing_m must be from 0.1 through 1.0")
+    if isinstance(raw_max_blocks, bool):
+        raise ValueError("route_inspection_max_blocks must be an integer from 1 through 256")
+    max_blocks = int(raw_max_blocks)
+    if max_blocks != float(raw_max_blocks) or not 1 <= max_blocks <= 256:
+        raise ValueError("route_inspection_max_blocks must be an integer from 1 through 256")
+    return half_width, sample_spacing, max_blocks
 
 
 def configured_cmd_vel_bridge(
@@ -1288,25 +1308,18 @@ def inspect_route_path_mcp(
         raise ValueError("path must contain from 1 through 256 paired points")
     if not all(math.isfinite(value) for value in navigation_x + navigation_y):
         raise ValueError("path coordinates must be finite")
-    body_y = exact_int(int(req.body_y), "body_y", -2048, 2048)
-    half_width = float(req.half_width_m)
-    sample_spacing = float(req.sample_spacing_m)
-    max_blocks = exact_int(int(req.max_blocks), "max_blocks", 1, 256)
-    if not math.isfinite(half_width) or not 0.30 <= half_width <= 1.5:
-        raise ValueError("half_width_m must be from 0.30 through 1.5")
-    if not math.isfinite(sample_spacing) or not 0.1 <= sample_spacing <= 1.0:
-        raise ValueError("sample_spacing_m must be from 0.1 through 1.0")
     result = action_request({
         "cmd": "inspect_route_path",
         "navigation_x": navigation_x,
         "navigation_y": navigation_y,
-        "body_y": body_y,
-        "half_width": half_width,
-        "sample_spacing": sample_spacing,
-        "max_blocks": max_blocks,
+        "half_width": route_inspection_half_width_m,
+        "sample_spacing": route_inspection_sample_spacing_m,
+        "max_blocks": route_inspection_max_blocks,
     })
     dirt_blocks = result.get("dirt_blocks")
-    other_count = exact_int(result.get("other_count"), "other_count", 0, max_blocks)
+    other_count = exact_int(
+        result.get("other_count"), "other_count", 0, route_inspection_max_blocks,
+    )
     if not isinstance(dirt_blocks, list):
         raise RuntimeError("Minecraft Mod returned invalid dirt_blocks")
     dirt_positions: list[tuple[int, int, int]] = []
@@ -1322,7 +1335,7 @@ def inspect_route_path_mcp(
         if position not in seen:
             seen.add(position)
             dirt_positions.append(position)
-    if len(dirt_positions) > max_blocks:
+    if len(dirt_positions) > route_inspection_max_blocks:
         raise RuntimeError("Minecraft Mod returned too many dirt route candidates")
     found = result.get("found")
     if not isinstance(found, bool):
@@ -1365,15 +1378,14 @@ def clear_route_path_mcp(
     handle = str(req.inspection_handle or "").strip()
     if not handle:
         raise ValueError("inspection_handle must be non-empty")
-    max_blocks = exact_int(int(req.max_blocks), "max_blocks", 1, 256)
     now = time.monotonic()
     with route_obstacles_lock:
         _prune_route_obstacles(now)
         inspection = route_path_inspections.pop(handle, None)
     if inspection is None:
         raise ValueError("unknown or expired inspection_handle; inspect the route again")
-    if len(inspection.dirt_positions) > max_blocks:
-        raise ValueError("inspection contains more blocks than max_blocks")
+    if len(inspection.dirt_positions) > route_inspection_max_blocks:
+        raise ValueError("inspection contains more blocks than the configured safety bound")
     cleared = 0
     for x, y, z in inspection.dirt_positions:
         aimed = action_request({
@@ -1852,6 +1864,8 @@ def initialize_camera(config: dict[str, Any]):
     global odom_topic, odom_frame_id, objects_topic, lidar_topic
     global camera_stream_hz, odom_stream_hz, lidar_stream_hz
     global lidar_ray_count, lidar_range_max
+    global route_inspection_half_width_m, route_inspection_sample_spacing_m
+    global route_inspection_max_blocks
     ready = init_mod(config)
     if isinstance(ready, Err):
         return ready
@@ -1879,6 +1893,11 @@ def initialize_camera(config: dict[str, Any]):
         lidar_stream_hz = configured_frequency("RBNX_MINECRAFT_LIDAR_HZ", 5.0)
         lidar_ray_count = configured_lidar_ray_count(config)
         lidar_range_max = configured_lidar_range(config)
+        (
+            route_inspection_half_width_m,
+            route_inspection_sample_spacing_m,
+            route_inspection_max_blocks,
+        ) = configured_route_inspection(config)
         camera_frame_id = str(config.get("camera_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_CAMERA_FRAME_ID", camera_frame_id,
         ))
