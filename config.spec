@@ -72,9 +72,9 @@ config:
   # float, radians per second, default: 1.0; must be within (0, pi].
   cmd_vel_max_angular: 1.0
 
-  # float, blocks/metres, default: 1.5; must be finite and within [0.3, 1.5].
+  # float, blocks/metres, default: 0.8; must be finite and within [0.3, 1.5].
   # Half-width of the swept corridor checked on route-obstacle recovery.
-  route_inspection_half_width_m: 1.5
+  route_inspection_half_width_m: 0.8
 
   # float, blocks/metres, default: 0.25; must be finite and within [0.1, 1].
   # Distance between exact block-collision samples along the Navigation path.

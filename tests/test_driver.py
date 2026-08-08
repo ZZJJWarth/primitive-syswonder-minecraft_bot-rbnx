@@ -1272,7 +1272,7 @@ class MinecraftModClientTest(unittest.TestCase):
 
     def test_route_inspection_configuration_is_system_owned_and_bounded(self) -> None:
         """Load corridor geometry from provider config and reject unsafe values."""
-        self.assertEqual(configured_route_inspection({}), (1.5, 0.25, 64))
+        self.assertEqual(configured_route_inspection({}), (0.8, 0.25, 64))
         self.assertEqual(configured_route_inspection({
             "route_inspection_half_width_m": 0.5,
             "route_inspection_sample_spacing_m": 0.1,

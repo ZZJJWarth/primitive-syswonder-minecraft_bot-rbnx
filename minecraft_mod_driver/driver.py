@@ -121,7 +121,7 @@ cmd_vel_command_duration_sec = 0.25
 cmd_vel_timeout_sec = 0.5
 cmd_vel_max_linear = 1.2
 cmd_vel_max_angular = 1.0
-route_inspection_half_width_m = 1.5
+route_inspection_half_width_m = 0.8
 route_inspection_sample_spacing_m = 0.25
 route_inspection_max_blocks = 64
 
@@ -709,7 +709,7 @@ def configured_eye_height(config: dict[str, Any]) -> float:
 
 def configured_route_inspection(config: dict[str, Any]) -> tuple[float, float, int]:
     """Validate the system-owned route corridor geometry and safety bound."""
-    half_width = float(config.get("route_inspection_half_width_m", 1.5))
+    half_width = float(config.get("route_inspection_half_width_m", 0.8))
     sample_spacing = float(config.get("route_inspection_sample_spacing_m", 0.25))
     raw_max_blocks = config.get("route_inspection_max_blocks", 64)
     if not math.isfinite(half_width) or not 0.30 <= half_width <= 1.5:
