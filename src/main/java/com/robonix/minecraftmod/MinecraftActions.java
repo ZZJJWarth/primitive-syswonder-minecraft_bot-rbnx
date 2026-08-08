@@ -57,6 +57,8 @@ public final class MinecraftActions implements AutoCloseable {
     private static final double MAX_TARGET_TRAVEL_DISTANCE = 16.0;
     private static final double ATTACK_APPROACH_DISTANCE = 2.6;
     private static final double ATTACK_REACH_DISTANCE = 3.1;
+    /** A blocked-path snapshot must start near the live Minecraft player. */
+    private static final double MAX_ROUTE_START_OFFSET_M = 2.0;
     private static final ResourceLocation DIRT = ResourceLocation.fromNamespaceAndPath("minecraft", "dirt");
     private static final ResourceLocation CRAFTING_TABLE =
             ResourceLocation.fromNamespaceAndPath("minecraft", "crafting_table");
@@ -307,6 +309,36 @@ public final class MinecraftActions implements AutoCloseable {
             }
             Minecraft minecraft = Minecraft.getInstance();
             LocalPlayer player = requirePlayer(minecraft);
+            double playerNavigationX = player.getX();
+            double playerNavigationY = -player.getZ();
+            double routeStartDistance = Math.hypot(
+                    navigationX[0] - playerNavigationX,
+                    navigationY[0] - playerNavigationY);
+            if (routeStartDistance > MAX_ROUTE_START_OFFSET_M) {
+                JsonObject response = new JsonObject();
+                response.addProperty("found", false);
+                response.addProperty("dirt_count", 0);
+                response.addProperty("other_count", 0);
+                response.add("dirt_blocks", new JsonArray());
+                response.add("other_blocks", new JsonArray());
+                response.addProperty("body_y", bodyY);
+                response.addProperty("player_x", player.getX());
+                response.addProperty("player_z", player.getZ());
+                response.addProperty("player_navigation_x", playerNavigationX);
+                response.addProperty("player_navigation_y", playerNavigationY);
+                response.addProperty("path_start_navigation_x", navigationX[0]);
+                response.addProperty("path_start_navigation_y", navigationY[0]);
+                response.addProperty("path_start_distance_m", routeStartDistance);
+                response.addProperty(
+                        "detail",
+                        String.format(
+                                java.util.Locale.ROOT,
+                                "planner path is not aligned with current minecraft_odom pose "
+                                        + "(start is %.2f m from player; maximum is %.2f m)",
+                                routeStartDistance,
+                                MAX_ROUTE_START_OFFSET_M));
+                return response;
+            }
             Map<BlockPos, String> dirt = new LinkedHashMap<>();
             Map<BlockPos, String> other = new LinkedHashMap<>();
             for (int index = 0; index < navigationX.length; index++) {
@@ -357,6 +389,16 @@ public final class MinecraftActions implements AutoCloseable {
             response.addProperty("body_y", bodyY);
             response.addProperty("player_x", player.getX());
             response.addProperty("player_z", player.getZ());
+            response.addProperty("player_navigation_x", playerNavigationX);
+            response.addProperty("player_navigation_y", playerNavigationY);
+            response.addProperty("path_start_navigation_x", navigationX[0]);
+            response.addProperty("path_start_navigation_y", navigationY[0]);
+            response.addProperty("path_start_distance_m", routeStartDistance);
+            response.addProperty(
+                    "detail",
+                    dirt.isEmpty() && other.isEmpty()
+                            ? "no collision block occupies the requested path corridor"
+                            : "route corridor inspection completed");
             return response;
         });
     }

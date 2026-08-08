@@ -1327,6 +1327,9 @@ def inspect_route_path_mcp(
     found = result.get("found")
     if not isinstance(found, bool):
         raise RuntimeError("Minecraft Mod returned invalid route inspection presence")
+    mod_detail = result.get("detail")
+    if mod_detail is not None and not isinstance(mod_detail, str):
+        raise RuntimeError("Minecraft Mod returned invalid route inspection detail")
     handle = str(uuid.uuid4()) if found else ""
     if handle:
         now = time.monotonic()
@@ -1344,8 +1347,12 @@ def inspect_route_path_mcp(
         dirt_count=len(dirt_positions),
         other_count=other_count,
         detail=(
-            f"found {len(dirt_positions)} dirt blocks in the footprint corridor"
-            if dirt_positions else "no dirt block occupies the footprint corridor"
+            mod_detail.strip()
+            if isinstance(mod_detail, str) and mod_detail.strip()
+            else (
+                f"found {len(dirt_positions)} dirt blocks in the footprint corridor"
+                if dirt_positions else "no dirt block occupies the footprint corridor"
+            )
         ),
     )
 
