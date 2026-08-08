@@ -119,6 +119,11 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     half-width plus padding. The Mod samples the path, checks the two body
     layers across the full width, and returns an opaque handle for the exact
     dirt candidates plus a count of non-clearable collision blocks.
+  - A planner snapshot may retain the route prefix already traversed by the
+    robot. The Mod aligns the live player to the nearest path segment, rejects
+    the request only when the entire route is more than two metres away, and
+    scans forward from that aligned segment instead of requiring the original
+    first point to remain near the player.
   - It never checks or clears the support block below `body_y`. Navigation
     frame points must be transformed explicitly; `map` coordinates and raw
     Scene coordinates are rejected by the caller before this primitive.

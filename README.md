@@ -201,7 +201,9 @@ Pilot can also compose the Minecraft state and action capabilities directly:
   `minecraft_odom`, together with the configured footprint half-width and the
   first body-block height. The Mod samples the swept corridor, checks both
   body layers, identifies exact `minecraft:dirt` blocks, and clears only those
-  candidates after navigation has stopped. The support layer is never cleared;
+  candidates after navigation has stopped. A stale traversed path prefix is
+  discarded by aligning the live player to the nearest route segment. The
+  support layer is never cleared;
   non-dirt blockers remain for a fresh navigation decision.
 - `robonix/primitive/minecraft/attack_entity` accepts a Scene-selected
   `minecraft:zombie` object ID and resolves it to the live Entity UUID. The Mod

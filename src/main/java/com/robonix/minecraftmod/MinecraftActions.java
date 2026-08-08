@@ -58,7 +58,7 @@ public final class MinecraftActions implements AutoCloseable {
     private static final double ATTACK_APPROACH_DISTANCE = 2.6;
     private static final double ATTACK_REACH_DISTANCE = 3.1;
     /** A blocked-path snapshot must start near the live Minecraft player. */
-    private static final double MAX_ROUTE_START_OFFSET_M = 2.0;
+    private static final double MAX_ROUTE_ALIGNMENT_DISTANCE_M = 2.0;
     private static final ResourceLocation DIRT = ResourceLocation.fromNamespaceAndPath("minecraft", "dirt");
     private static final ResourceLocation CRAFTING_TABLE =
             ResourceLocation.fromNamespaceAndPath("minecraft", "crafting_table");
@@ -317,10 +317,36 @@ public final class MinecraftActions implements AutoCloseable {
             int effectiveBodyY = playerBodyY;
             double playerNavigationX = player.getX();
             double playerNavigationY = -player.getZ();
-            double routeStartDistance = Math.hypot(
+            double originalPathStartDistance = Math.hypot(
                     navigationX[0] - playerNavigationX,
                     navigationY[0] - playerNavigationY);
-            if (routeStartDistance > MAX_ROUTE_START_OFFSET_M) {
+            int alignedSegmentIndex = 0;
+            double alignedNavigationX = navigationX[0];
+            double alignedNavigationY = navigationY[0];
+            double routeAlignmentDistance = originalPathStartDistance;
+            for (int index = 0; index + 1 < navigationX.length; index++) {
+                double deltaX = navigationX[index + 1] - navigationX[index];
+                double deltaY = navigationY[index + 1] - navigationY[index];
+                double lengthSquared = deltaX * deltaX + deltaY * deltaY;
+                double ratio = lengthSquared == 0.0 ? 0.0 : Mth.clamp(
+                        ((playerNavigationX - navigationX[index]) * deltaX
+                                + (playerNavigationY - navigationY[index]) * deltaY)
+                                / lengthSquared,
+                        0.0,
+                        1.0);
+                double projectedX = navigationX[index] + deltaX * ratio;
+                double projectedY = navigationY[index] + deltaY * ratio;
+                double distance = Math.hypot(
+                        projectedX - playerNavigationX,
+                        projectedY - playerNavigationY);
+                if (distance < routeAlignmentDistance) {
+                    routeAlignmentDistance = distance;
+                    alignedSegmentIndex = index;
+                    alignedNavigationX = projectedX;
+                    alignedNavigationY = projectedY;
+                }
+            }
+            if (routeAlignmentDistance > MAX_ROUTE_ALIGNMENT_DISTANCE_M) {
                 JsonObject response = new JsonObject();
                 response.addProperty("found", false);
                 response.addProperty("dirt_count", 0);
@@ -336,22 +362,28 @@ public final class MinecraftActions implements AutoCloseable {
                 response.addProperty("player_navigation_y", playerNavigationY);
                 response.addProperty("path_start_navigation_x", navigationX[0]);
                 response.addProperty("path_start_navigation_y", navigationY[0]);
-                response.addProperty("path_start_distance_m", routeStartDistance);
+                response.addProperty("path_start_distance_m", originalPathStartDistance);
+                response.addProperty("nearest_path_navigation_x", alignedNavigationX);
+                response.addProperty("nearest_path_navigation_y", alignedNavigationY);
+                response.addProperty("nearest_path_segment_index", alignedSegmentIndex);
+                response.addProperty("route_alignment_distance_m", routeAlignmentDistance);
                 response.addProperty(
                         "detail",
                         String.format(
                                 java.util.Locale.ROOT,
                                 "planner path is not aligned with current minecraft_odom pose "
-                                        + "(start is %.2f m from player; maximum is %.2f m)",
-                                routeStartDistance,
-                                MAX_ROUTE_START_OFFSET_M));
+                                        + "(nearest route segment is %.2f m from player; maximum is %.2f m)",
+                                routeAlignmentDistance,
+                                MAX_ROUTE_ALIGNMENT_DISTANCE_M));
                 return response;
             }
             Map<BlockPos, String> dirt = new LinkedHashMap<>();
             Map<BlockPos, String> other = new LinkedHashMap<>();
-            for (int index = 0; index < navigationX.length; index++) {
-                double startX = navigationX[index];
-                double startZ = -navigationY[index];
+            for (int index = alignedSegmentIndex; index < navigationX.length; index++) {
+                double startX = index == alignedSegmentIndex ? alignedNavigationX : navigationX[index];
+                double startNavigationY = index == alignedSegmentIndex
+                        ? alignedNavigationY : navigationY[index];
+                double startZ = -startNavigationY;
                 double endX = index + 1 < navigationX.length ? navigationX[index + 1] : startX;
                 double endZ = index + 1 < navigationX.length ? -navigationY[index + 1] : startZ;
                 double length = Math.hypot(endX - startX, endZ - startZ);
@@ -403,7 +435,11 @@ public final class MinecraftActions implements AutoCloseable {
             response.addProperty("player_navigation_y", playerNavigationY);
             response.addProperty("path_start_navigation_x", navigationX[0]);
             response.addProperty("path_start_navigation_y", navigationY[0]);
-            response.addProperty("path_start_distance_m", routeStartDistance);
+            response.addProperty("path_start_distance_m", originalPathStartDistance);
+            response.addProperty("nearest_path_navigation_x", alignedNavigationX);
+            response.addProperty("nearest_path_navigation_y", alignedNavigationY);
+            response.addProperty("nearest_path_segment_index", alignedSegmentIndex);
+            response.addProperty("route_alignment_distance_m", routeAlignmentDistance);
             response.addProperty(
                     "detail",
                     dirt.isEmpty() && other.isEmpty()
