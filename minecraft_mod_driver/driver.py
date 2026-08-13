@@ -1666,6 +1666,50 @@ def withdraw_item_mcp(
     return minecraft_mcp.WithdrawItemV2_Response(**fields)
 
 
+@minecraft_actions.mcp("robonix/primitive/minecraft/inspect_container")
+def inspect_container_mcp(
+    req: minecraft_mcp.InspectContainerV2_Request,
+) -> minecraft_mcp.InspectContainerV2_Response:
+    """Open a Scene-selected chest and inspect every slot without moving items.
+
+    Before calling, MUST call ``scene_list_objects``, select the intended
+    chest, copy its stable ``id`` unchanged into ``object_id``, and aim at the
+    same object. Camera images, remembered coordinates, and
+    ``minecraft_get_state`` cannot supply this ID.
+    """
+    x, y, z = native_block_pos(req.object_id)
+    result = action_request({
+        "cmd": "inspect_container",
+        "x": x,
+        "y": y,
+        "z": z,
+    })
+    container_type = registry_name(result.get("container_type"), "container_type")
+    if container_type not in {"minecraft:chest", "minecraft:trapped_chest"}:
+        raise RuntimeError("Minecraft Mod returned an unsupported container type")
+    slot_count = exact_int(result.get("slot_count"), "slot_count", 1, 4_294_967_295)
+    raw_slots = result.get("slots")
+    if not isinstance(raw_slots, list) or len(raw_slots) != slot_count:
+        raise RuntimeError("Minecraft Mod container slot count is inconsistent")
+    slots = []
+    for expected, raw in enumerate(raw_slots):
+        if not isinstance(raw, dict):
+            raise RuntimeError("Minecraft Mod container slot is not an object")
+        slot = exact_int(raw.get("slot"), "slot", 0, slot_count - 1)
+        if slot != expected:
+            raise RuntimeError(f"Minecraft Mod container returned unexpected slot {slot}")
+        item = registry_name(raw.get("item"), "item")
+        count = exact_int(raw.get("count"), "count", 0, 4_294_967_295)
+        if (item == "minecraft:air") != (count == 0):
+            raise RuntimeError("Minecraft Mod container empty slot is inconsistent")
+        slots.append(minecraft_mcp.InventorySlot(slot=slot, item=item, count=count))
+    return minecraft_mcp.InspectContainerV2_Response(
+        container_type=container_type,
+        slot_count=slot_count,
+        slots=slots,
+    )
+
+
 @minecraft_actions.mcp("robonix/primitive/minecraft/fill_water_bottles")
 def fill_water_bottles_mcp(
     req: minecraft_mcp.FillWaterBottlesV2_Request,

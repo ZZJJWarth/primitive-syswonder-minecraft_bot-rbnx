@@ -219,6 +219,9 @@ Pilot can also compose the Minecraft state and action capabilities directly:
   object ID, any exact registered item name, and a positive quantity. It
   transfers exactly that quantity or fails before mutation when the chest has
   none, has too few, or the player's main inventory lacks capacity.
+- `robonix/primitive/minecraft/inspect_container` accepts the same stable chest
+  object ID, opens the chest through the normal interaction, returns every
+  slot's exact item ID and count without moving anything, and closes the menu.
 - `robonix/primitive/minecraft/fill_water_bottles` accepts a stable water
   cauldron object ID and a count from one through three. It checks water
   level, main-inventory glass bottles, and inventory capacity before using the

@@ -45,5 +45,7 @@ capabilities:
     path: capabilities/minecraft/deposit_item.v2.toml
   - name: robonix/primitive/minecraft/withdraw_item
     path: capabilities/minecraft/withdraw_item.v2.toml
+  - name: robonix/primitive/minecraft/inspect_container
+    path: capabilities/minecraft/inspect_container.v2.toml
   - name: robonix/primitive/minecraft/fill_water_bottles
     path: capabilities/minecraft/fill_water_bottles.v2.toml

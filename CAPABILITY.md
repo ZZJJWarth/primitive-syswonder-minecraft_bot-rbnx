@@ -155,9 +155,14 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
 - `robonix/primitive/minecraft/withdraw_item`
   - Withdraws an exact positive quantity of any registered item from an
     explicit, visible, reachable chest or trapped chest. It fails before
-    mutation when the item is absent, the available quantity is insufficient,
-    or the player's main inventory lacks capacity. Success requires matching
-    player and container count changes.
+  mutation when the item is absent, the available quantity is insufficient,
+  or the player's main inventory lacks capacity. Success requires matching
+  player and container count changes.
+- `robonix/primitive/minecraft/inspect_container`
+  - Opens an explicit, visible, reachable chest or trapped chest, waits for its
+    menu to synchronize, and returns every slot's exact registered item name
+    and count without moving any item. The menu is closed after success or
+    failure.
 - `robonix/primitive/minecraft/fill_water_bottles`
   - Fills exactly one through three `minecraft:glass_bottle` items from an
     explicit, visible, reachable `minecraft:water_cauldron` using normal

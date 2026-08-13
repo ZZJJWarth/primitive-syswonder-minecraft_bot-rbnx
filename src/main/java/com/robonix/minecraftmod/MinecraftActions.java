@@ -633,6 +633,38 @@ public final class MinecraftActions implements AutoCloseable {
         return result;
     }
 
+    /** Opens a chest and returns an immutable snapshot without moving any items. */
+    public CompletableFuture<JsonObject> inspectContainer(int x, int y, int z) {
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        Minecraft.getInstance().execute(() -> {
+            try {
+                requireNoActiveAction();
+                Minecraft minecraft = Minecraft.getInstance();
+                LocalPlayer player = requireSurvivalPlayer(minecraft);
+                BlockPos target = new BlockPos(x, y, z);
+                BlockHitResult hit = validateDepositTarget(minecraft, player, target);
+                BlockState state = minecraft.level.getBlockState(target);
+                if (!state.is(Blocks.CHEST) && !state.is(Blocks.TRAPPED_CHEST)) {
+                    throw new IllegalStateException("target block is not a chest: " + blockName(state));
+                }
+                control.stopForAction();
+                if (!minecraft.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit).consumesAction()) {
+                    throw new IllegalStateException("Minecraft rejected the chest interaction");
+                }
+                activeAction = new ActiveInspectContainer(
+                        player,
+                        target,
+                        player.inventoryMenu,
+                        blockName(state),
+                        System.nanoTime() + ACTION_TIMEOUT_NANOS,
+                        result);
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
+    }
+
     /** Validates and begins exact glass-bottle interactions with one water cauldron. */
     public CompletableFuture<JsonObject> fillWaterBottles(
             int x,
@@ -734,6 +766,8 @@ public final class MinecraftActions implements AutoCloseable {
                 tickDeposit(minecraft, player, deposit);
             } else if (action instanceof ActiveWithdraw withdraw) {
                 tickWithdraw(minecraft, player, withdraw);
+            } else if (action instanceof ActiveInspectContainer inspecting) {
+                tickInspectContainer(minecraft, player, inspecting);
             } else if (action instanceof ActiveFillWaterBottles fill) {
                 tickFillWaterBottles(minecraft, player, fill);
             } else if (action instanceof ActiveAim aiming) {
@@ -1324,6 +1358,43 @@ public final class MinecraftActions implements AutoCloseable {
         finishActive(response);
     }
 
+    /** Waits for a stable chest menu, snapshots every slot, and closes it. */
+    private void tickInspectContainer(
+            Minecraft minecraft,
+            LocalPlayer player,
+            ActiveInspectContainer action
+    ) {
+        validateTarget(minecraft, player, action.target());
+        BlockState targetState = minecraft.level.getBlockState(action.target());
+        if (!targetState.is(Blocks.CHEST) && !targetState.is(Blocks.TRAPPED_CHEST)) {
+            throw new IllegalStateException("target chest was removed or replaced");
+        }
+        AbstractContainerMenu menu = player.containerMenu;
+        if (menu == action.inventoryMenu()) {
+            action.resetStableTicks();
+            return;
+        }
+        if (!(minecraft.screen instanceof AbstractContainerScreen<?>) || !(menu instanceof ChestMenu)) {
+            throw new IllegalStateException("another menu replaced the requested chest interaction");
+        }
+        int containerSlots = menu.slots.size() - 36;
+        if (containerSlots <= 0) {
+            throw new IllegalStateException("opened menu has no container slots");
+        }
+        if (action.incrementStableTicks() < 3) {
+            return;
+        }
+        JsonArray slots = new JsonArray();
+        for (int slot = 0; slot < containerSlots; slot++) {
+            slots.add(slotResult(slot, menu.getSlot(slot).getItem()));
+        }
+        JsonObject response = new JsonObject();
+        response.addProperty("container_type", action.containerType());
+        response.addProperty("slot_count", containerSlots);
+        response.add("slots", slots);
+        finishActive(response);
+    }
+
     /** Selects an empty bottle, performs one normal use, and awaits all three deltas. */
     private void tickFillWaterBottles(
             Minecraft minecraft,
@@ -1462,6 +1533,10 @@ public final class MinecraftActions implements AutoCloseable {
             if (menu != withdraw.inventoryMenu()) {
                 player.closeContainer();
             }
+        }
+        if (action instanceof ActiveInspectContainer inspecting && player != null
+                && player.containerMenu != inspecting.inventoryMenu()) {
+            player.closeContainer();
         }
         if (action instanceof ActiveFillWaterBottles fill && player != null) {
             player.getInventory().selected = fill.originalSelectedSlot();
@@ -1955,12 +2030,48 @@ public final class MinecraftActions implements AutoCloseable {
     }
 
     private sealed interface ActiveAction permits ActiveAim, ActiveAttack, ActiveBreak, ActiveDeposit,
-            ActiveWithdraw, ActiveFillWaterBottles, ActiveSelectInventoryItem {
+            ActiveWithdraw, ActiveInspectContainer, ActiveFillWaterBottles, ActiveSelectInventoryItem {
         LocalPlayer player();
 
         long deadlineNanos();
 
         CompletableFuture<JsonObject> result();
+    }
+
+    /** Retains the opened-menu identity while a read-only chest snapshot stabilizes. */
+    private static final class ActiveInspectContainer implements ActiveAction {
+        private final LocalPlayer player;
+        private final BlockPos target;
+        private final AbstractContainerMenu inventoryMenu;
+        private final String containerType;
+        private final long deadlineNanos;
+        private final CompletableFuture<JsonObject> result;
+        private int stableTicks;
+
+        ActiveInspectContainer(
+                LocalPlayer player,
+                BlockPos target,
+                AbstractContainerMenu inventoryMenu,
+                String containerType,
+                long deadlineNanos,
+                CompletableFuture<JsonObject> result
+        ) {
+            this.player = player;
+            this.target = target;
+            this.inventoryMenu = inventoryMenu;
+            this.containerType = containerType;
+            this.deadlineNanos = deadlineNanos;
+            this.result = result;
+        }
+
+        int incrementStableTicks() { return ++stableTicks; }
+        void resetStableTicks() { stableTicks = 0; }
+        BlockPos target() { return target; }
+        AbstractContainerMenu inventoryMenu() { return inventoryMenu; }
+        String containerType() { return containerType; }
+        @Override public LocalPlayer player() { return player; }
+        @Override public long deadlineNanos() { return deadlineNanos; }
+        @Override public CompletableFuture<JsonObject> result() { return result; }
     }
 
     /** Retains native UUID combat state, safety bounds, and verification counters. */

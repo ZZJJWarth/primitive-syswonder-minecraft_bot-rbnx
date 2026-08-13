@@ -199,6 +199,10 @@ public final class LocalCommandServer implements AutoCloseable {
                     requiredInt(request, "z"),
                     requiredString(request, "item"),
                     requiredLong(request, "count"));
+            case "inspect_container" -> actions.inspectContainer(
+                    requiredInt(request, "x"),
+                    requiredInt(request, "y"),
+                    requiredInt(request, "z"));
             case "fill_water_bottles" -> actions.fillWaterBottles(
                     requiredInt(request, "x"),
                     requiredInt(request, "y"),

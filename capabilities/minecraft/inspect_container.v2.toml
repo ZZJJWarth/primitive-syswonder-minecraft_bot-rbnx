@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/minecraft/inspect_container"
+version = "2"
+kind    = "primitive"
+idl     = "minecraft/srv/InspectContainerV2.srv"
+description = "Open a visible reachable chest without moving items and return every container slot with its exact registered item name and count. First call robonix/system/scene/list_objects and copy the selected chest's stable id unchanged into object_id; then call aim_at_block with the same ID and require aimed=true. Never derive a target from Scene coordinates, a camera image, memory, goal_near, or minecraft/get_state. Unknown or stale IDs require a fresh Scene query. Reach, crosshair, wrong-target, rejected-interaction, menu, and timeout failures remain explicit."
+
+[mode]
+type = "rpc"

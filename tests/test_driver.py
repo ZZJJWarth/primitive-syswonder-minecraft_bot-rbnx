@@ -761,6 +761,35 @@ class MinecraftModClientTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "container counts"):
                 driver.withdraw_item_mcp(message)
 
+    def test_inspect_container_returns_exact_read_only_slots(self) -> None:
+        """Resolve a Scene chest and validate every returned container slot."""
+        message = driver.minecraft_mcp.InspectContainerV2_Request(
+            object_id=semantic_target(),
+        )
+        result = {
+            "container_type": "minecraft:chest",
+            "slot_count": 3,
+            "slots": [
+                {"slot": 0, "item": "minecraft:crafting_table", "count": 1},
+                {"slot": 1, "item": "minecraft:air", "count": 0},
+                {"slot": 2, "item": "minecraft:glass_bottle", "count": 3},
+            ],
+        }
+        with patch.object(driver.client, "request", return_value=result) as request:
+            response = driver.inspect_container_mcp(message)
+        self.assertEqual(response.container_type, "minecraft:chest")
+        self.assertEqual(response.slot_count, 3)
+        self.assertEqual(response.slots[0].item, "minecraft:crafting_table")
+        self.assertEqual(response.slots[2].count, 3)
+        self.assertEqual(request.call_args.args[0], {
+            "cmd": "inspect_container", "x": 2, "y": 64, "z": 1,
+        })
+
+        result["slots"][1] = {"slot": 1, "item": "minecraft:air", "count": 1}
+        with patch.object(driver.client, "request", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "empty slot"):
+                driver.inspect_container_mcp(message)
+
     def test_withdraw_item_rejects_zero_before_request(self) -> None:
         """Require a positive quantity at the capability boundary."""
         message = driver.minecraft_mcp.WithdrawItemV2_Request(
@@ -956,6 +985,7 @@ class MinecraftModClientTest(unittest.TestCase):
             "aim_at_block.v2.toml",
             "deposit_item.v2.toml",
             "withdraw_item.v2.toml",
+            "inspect_container.v2.toml",
             "fill_water_bottles.v2.toml",
         ):
             with (package_root / "capabilities" / "minecraft" / name).open("rb") as stream:
@@ -972,6 +1002,7 @@ class MinecraftModClientTest(unittest.TestCase):
             driver.aim_at_block_mcp,
             driver.deposit_item_mcp,
             driver.withdraw_item_mcp,
+            driver.inspect_container_mcp,
             driver.fill_water_bottles_mcp,
         ):
             description = " ".join((operation.__doc__ or "").split())
