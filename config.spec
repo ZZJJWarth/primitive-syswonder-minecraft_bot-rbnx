@@ -13,13 +13,13 @@ config:
   ground_truth_topic: /minecraft/ground_truth/pose
 
   # string, ROS frame ID, default: minecraft_camera_optical_frame.
-  # Optical frame assigned to RGB, depth, camera calibration, and the static
-  # base-frame transform; initialization fails when ROS 2 rejects the
+  # Optical frame assigned to RGB, depth, camera calibration, and the dynamic
+  # pitched base-frame transform; initialization fails when ROS 2 rejects the
   # configured frame or topic setup.
   camera_frame_id: minecraft_camera_optical_frame
 
   # string, ROS frame ID, default: minecraft_view_base.
-  # Player view-base frame used as the odometry/TF child and camera parent.
+  # Level, yaw-only player base used as the odometry/TF child and camera parent.
   base_frame_id: minecraft_view_base
 
   # string, ROS frame ID, default: minecraft_odom.

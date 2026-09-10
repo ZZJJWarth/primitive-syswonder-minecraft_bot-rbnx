@@ -24,6 +24,7 @@ from minecraft_mod_driver.driver import (
     MinecraftModClient,
     cmd_vel_message_values,
     cmd_vel_payload,
+    camera_quaternion_from_pitch,
     configured_cmd_vel_bridge,
     configured_eye_height,
     configured_frequency,
@@ -1408,6 +1409,14 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertAlmostEqual(down[1], math.sqrt(0.5))
         self.assertAlmostEqual(down[3], math.sqrt(0.5))
 
+    def test_camera_quaternion_carries_pitch_after_optical_axis_conversion(self) -> None:
+        """Keep head pitch on the camera child while the navigation base stays level."""
+        neutral = camera_quaternion_from_pitch(0.0)
+        self.assertEqual(neutral, (-0.5, 0.5, -0.5, 0.5))
+        pitched = camera_quaternion_from_pitch(0.4)
+        self.assertAlmostEqual(sum(value * value for value in pitched), 1.0)
+        self.assertNotEqual(pitched, neutral)
+
     def test_configured_frequency_rejects_nonfinite_or_out_of_range(self) -> None:
         """Reject rates that would kill a worker or create a tight request loop."""
         for value in ("nan", "inf", "0", "61"):
@@ -1638,16 +1647,22 @@ class MinecraftModClientTest(unittest.TestCase):
         geometry_msgs.msg = geometry_msgs_msg
         publisher = SimpleNamespace(publish=Mock())
         broadcaster = SimpleNamespace(sendTransform=Mock())
+        extrinsics_publisher = SimpleNamespace(publish=Mock())
+        camera_broadcaster = SimpleNamespace(sendTransform=Mock())
         observation = {
             "position": {"x": 4.0, "y": 64.0, "z": 3.0},
             "yaw": 0.0,
-            "pitch": 0.0,
+            "pitch": 0.4,
         }
         previous_publisher = driver.odom_publisher
         previous_broadcaster = driver.odom_transform_broadcaster
+        previous_extrinsics_publisher = driver.extrinsics_publisher
+        previous_camera_broadcaster = driver.camera_transform_broadcaster
         previous_sample = driver.previous_odom_sample
         driver.odom_publisher = publisher
         driver.odom_transform_broadcaster = broadcaster
+        driver.extrinsics_publisher = extrinsics_publisher
+        driver.camera_transform_broadcaster = camera_broadcaster
         driver.previous_odom_sample = (9.0, 4.0, -2.0, math.pi / 2.0)
         try:
             with patch.dict(sys.modules, {
@@ -1660,12 +1675,20 @@ class MinecraftModClientTest(unittest.TestCase):
         finally:
             driver.odom_publisher = previous_publisher
             driver.odom_transform_broadcaster = previous_broadcaster
+            driver.extrinsics_publisher = previous_extrinsics_publisher
+            driver.camera_transform_broadcaster = previous_camera_broadcaster
             driver.previous_odom_sample = previous_sample
         message = publisher.publish.call_args.args[0]
         self.assertEqual((message.header.frame_id, message.child_frame_id), (
             driver.odom_frame_id, driver.base_frame_id,
         ))
         self.assertEqual((message.pose.pose.position.x, message.pose.pose.position.y), (4.0, -3.0))
+        self.assertEqual((
+            message.pose.pose.orientation.x,
+            message.pose.pose.orientation.y,
+            message.pose.pose.orientation.z,
+            message.pose.pose.orientation.w,
+        ), quaternion_from_yaw_pitch(math.pi / 2.0, 0.0))
         self.assertAlmostEqual(message.twist.twist.linear.x, -1.0)
         self.assertAlmostEqual(message.twist.twist.linear.y, 0.0)
         transform = broadcaster.sendTransform.call_args.args[0]
@@ -1696,9 +1719,22 @@ class MinecraftModClientTest(unittest.TestCase):
             message.pose.pose.orientation.z,
             message.pose.pose.orientation.w,
         ))
+        camera_transform = camera_broadcaster.sendTransform.call_args.args[0]
+        self.assertEqual((camera_transform.header.stamp.sec, camera_transform.header.stamp.nanosec), (
+            message.header.stamp.sec, message.header.stamp.nanosec,
+        ))
+        self.assertEqual((camera_transform.header.frame_id, camera_transform.child_frame_id), (
+            driver.base_frame_id, driver.camera_frame_id,
+        ))
+        self.assertEqual((
+            camera_transform.transform.rotation.x,
+            camera_transform.transform.rotation.y,
+            camera_transform.transform.rotation.z,
+            camera_transform.transform.rotation.w,
+        ), camera_quaternion_from_pitch(0.4))
 
-    def test_publish_extrinsics_also_broadcasts_static_tf(self) -> None:
-        """Keep the extrinsics capability and standard TF tree identical."""
+    def test_publish_extrinsics_broadcasts_timestamped_pitch_tf(self) -> None:
+        """Expose the same pitched camera transform on the contract and TF tree."""
         class FakeTransformStamped:
             """Provide the fixed transform fields populated by the provider."""
 
@@ -1720,29 +1756,32 @@ class MinecraftModClientTest(unittest.TestCase):
         publisher = SimpleNamespace(publish=Mock())
         broadcaster = SimpleNamespace(sendTransform=Mock())
         previous_publisher = driver.extrinsics_publisher
-        previous_broadcaster = driver.static_transform_broadcaster
+        previous_broadcaster = driver.camera_transform_broadcaster
         driver.extrinsics_publisher = publisher
-        driver.static_transform_broadcaster = broadcaster
+        driver.camera_transform_broadcaster = broadcaster
         try:
             with patch.dict(sys.modules, {
                 "geometry_msgs": geometry_msgs,
                 "geometry_msgs.msg": geometry_msgs_msg,
             }):
-                driver.publish_extrinsics()
+                driver.publish_extrinsics(pitch=0.4, timestamp=12.25)
         finally:
             driver.extrinsics_publisher = previous_publisher
-            driver.static_transform_broadcaster = previous_broadcaster
+            driver.camera_transform_broadcaster = previous_broadcaster
         message = publisher.publish.call_args.args[0]
         broadcaster.sendTransform.assert_called_once_with(message)
         self.assertEqual((message.header.frame_id, message.child_frame_id), (
             driver.base_frame_id, driver.camera_frame_id,
+        ))
+        self.assertEqual((message.header.stamp.sec, message.header.stamp.nanosec), (
+            12, 250_000_000,
         ))
         self.assertEqual((
             message.transform.rotation.x,
             message.transform.rotation.y,
             message.transform.rotation.z,
             message.transform.rotation.w,
-        ), (-0.5, 0.5, -0.5, 0.5))
+        ), camera_quaternion_from_pitch(0.4))
 
     def test_zero_move_stops_without_forward_motion(self) -> None:
         """Translate an all-zero chassis command to stop rather than forward."""

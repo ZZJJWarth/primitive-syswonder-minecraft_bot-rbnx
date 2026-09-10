@@ -26,10 +26,10 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
   - RGB and depth samples are acquired sequentially rather than as an atomic
     pair; either stream remains available if the other capture fails.
 - `robonix/primitive/camera/extrinsics`
-  - Publishes the fixed view-base to camera-optical transform with latched
-    delivery.
-  - Broadcasts the same fixed transform over `/tf_static` for standard ROS
-    consumers.
+  - Publishes the timestamped view-base to camera-optical transform, including
+    the player's current positive-down view pitch.
+  - Broadcasts the same dynamic transform over `/tf` for standard ROS
+    consumers while the yaw-only navigation base stays level.
 - `robonix/primitive/chassis/move`
   - Applies forward/backward distances up to 32 blocks through Minecraft key
     mappings and stops using measured player displacement.

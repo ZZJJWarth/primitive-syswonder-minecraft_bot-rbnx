@@ -52,7 +52,7 @@ lidar_publisher = None
 clock_publisher = None
 ground_truth_publisher = None
 odom_transform_broadcaster = None
-static_transform_broadcaster = None
+camera_transform_broadcaster = None
 cmd_vel_subscription = None
 camera_stream_stop = threading.Event()
 odom_stream_stop = threading.Event()
@@ -448,6 +448,20 @@ def quaternion_from_yaw_pitch(yaw: float, pitch: float) -> tuple[float, float, f
     )
 
 
+def camera_quaternion_from_pitch(pitch: float) -> tuple[float, float, float, float]:
+    """Rotate the ROS optical axes by the player's positive-down view pitch."""
+    half_pitch = pitch / 2.0
+    sin_pitch, cos_pitch = math.sin(half_pitch), math.cos(half_pitch)
+    # q_pitch * q_optical, where q_optical is the fixed conversion from
+    # camera optical axes (right/down/forward) to base axes (forward/left/up).
+    return (
+        -0.5 * (cos_pitch + sin_pitch),
+        0.5 * (cos_pitch + sin_pitch),
+        0.5 * (sin_pitch - cos_pitch),
+        0.5 * (cos_pitch - sin_pitch),
+    )
+
+
 def observation_pose(observation: dict[str, Any]) -> tuple[float, float, float, float, float]:
     """Convert Minecraft east/up/south coordinates and view angles to ROS ENU."""
     position = observation.get("position") or {}
@@ -589,25 +603,28 @@ def publish_semantic_objects(observation: dict[str, Any]) -> None:
     objects_publisher.publish(String(data=json.dumps(payload, separators=(",", ":"))))
 
 
-def publish_extrinsics() -> None:
-    """Publish the fixed view-base to optical-frame axis conversion."""
+def publish_extrinsics(pitch: float = 0.0, timestamp: float | None = None) -> None:
+    """Publish the timestamped view-base to pitched optical-frame transform."""
     if extrinsics_publisher is None:
         raise RuntimeError("camera extrinsics publisher is not initialized")
-    if static_transform_broadcaster is None:
-        raise RuntimeError("static transform broadcaster is not initialized")
+    if camera_transform_broadcaster is None:
+        raise RuntimeError("camera transform broadcaster is not initialized")
+    if not math.isfinite(pitch):
+        raise ValueError("camera pitch must be finite")
     from geometry_msgs.msg import TransformStamped  # type: ignore
 
     message = TransformStamped()
-    now = 0.0 if use_sim_time else time.time()
+    now = timestamp if timestamp is not None else (0.0 if use_sim_time else time.time())
     message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp(now)
     message.header.frame_id = base_frame_id
     message.child_frame_id = camera_frame_id
-    message.transform.rotation.x = -0.5
-    message.transform.rotation.y = 0.5
-    message.transform.rotation.z = -0.5
-    message.transform.rotation.w = 0.5
+    quaternion = camera_quaternion_from_pitch(pitch)
+    message.transform.rotation.x = quaternion[0]
+    message.transform.rotation.y = quaternion[1]
+    message.transform.rotation.z = quaternion[2]
+    message.transform.rotation.w = quaternion[3]
     extrinsics_publisher.publish(message)
-    static_transform_broadcaster.sendTransform(message)
+    camera_transform_broadcaster.sendTransform(message)
 
 
 def publish_intrinsics(
@@ -682,7 +699,10 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
     message.pose.pose.position.x = x
     message.pose.pose.position.y = y
     message.pose.pose.position.z = z
-    quaternion = quaternion_from_yaw_pitch(yaw, pitch)
+    # A 2D navigation/SLAM base frame must stay level. The player's head pitch
+    # belongs on base -> camera, otherwise RTAB-Map interprets ground pixels as
+    # level points in front of the robot and the planar LaserScan tilts too.
+    quaternion = quaternion_from_yaw_pitch(yaw, 0.0)
     message.pose.pose.orientation.x = quaternion[0]
     message.pose.pose.orientation.y = quaternion[1]
     message.pose.pose.orientation.z = quaternion[2]
@@ -706,6 +726,9 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
     transform.transform.rotation.w = message.pose.pose.orientation.w
     odom_transform_broadcaster.sendTransform(transform)
 
+    if extrinsics_publisher is not None and camera_transform_broadcaster is not None:
+        publish_extrinsics(pitch, now)
+
     if ground_truth_publisher is not None:
         from geometry_msgs.msg import PoseStamped  # type: ignore
 
@@ -713,7 +736,12 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
         truth.header.stamp.sec = message.header.stamp.sec
         truth.header.stamp.nanosec = message.header.stamp.nanosec
         truth.header.frame_id = odom_frame_id
-        truth.pose = message.pose.pose
+        truth.pose.position = message.pose.pose.position
+        view_quaternion = quaternion_from_yaw_pitch(yaw, pitch)
+        truth.pose.orientation.x = view_quaternion[0]
+        truth.pose.orientation.y = view_quaternion[1]
+        truth.pose.orientation.z = view_quaternion[2]
+        truth.pose.orientation.w = view_quaternion[3]
         ground_truth_publisher.publish(truth)
 
 
@@ -2062,7 +2090,7 @@ def initialize_camera(config: dict[str, Any]):
     """Initialize camera streams and the colocated chassis after Mod readiness."""
     global rgb_publisher, depth_publisher, extrinsics_publisher, intrinsics_publisher
     global objects_publisher, lidar_publisher, clock_publisher, use_sim_time
-    global static_transform_broadcaster
+    global camera_transform_broadcaster
     global camera_frame_id, base_frame_id, lidar_frame_id, eye_height
     global rgb_topic, depth_topic, extrinsics_topic, intrinsics_topic
     global odom_topic, odom_frame_id, objects_topic, lidar_topic
@@ -2173,16 +2201,15 @@ def initialize_camera(config: dict[str, Any]):
             msg_type=LaserScan,
             qos="best_effort",
         )
-        from tf2_ros import StaticTransformBroadcaster  # type: ignore
+        from tf2_ros import TransformBroadcaster  # type: ignore
 
-        static_transform_broadcaster = StaticTransformBroadcaster(
+        camera_transform_broadcaster = TransformBroadcaster(
             RosBackend.get().node,
         )
         if use_sim_time and clock_publisher is None:
             from rosgraph_msgs.msg import Clock  # type: ignore
 
             clock_publisher = RosBackend.get().node.create_publisher(Clock, "/clock", 10)
-        publish_extrinsics()
     except Exception as exc:  # noqa: BLE001
         return Err(f"ROS2 camera stream initialization failed: {exc}")
     chassis_result = initialize_chassis(config)
@@ -2211,7 +2238,6 @@ def activate_camera():
         )) or (use_sim_time and clock_publisher is None):
             return Err("camera and lidar streams are not initialized")
         try:
-            publish_extrinsics()
             start_clock_stream()
             chassis_result = activate_chassis()
             if isinstance(chassis_result, Err):
