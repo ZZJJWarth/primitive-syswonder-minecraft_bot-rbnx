@@ -26,6 +26,7 @@ import net.minecraft.client.Minecraft;
 /** Serves the confirmed loopback JSON-lines command interface. */
 public final class LocalCommandServer implements AutoCloseable {
     private static final Gson GSON = new Gson();
+    private final SimulationClock simulationClock;
     private final FrameCapture frameCapture;
     private final DepthCapture depthCapture;
     private final MinecraftControl control;
@@ -40,12 +41,14 @@ public final class LocalCommandServer implements AutoCloseable {
     private volatile ServerSocket serverSocket;
 
     public LocalCommandServer(
+            SimulationClock simulationClock,
             FrameCapture frameCapture,
             DepthCapture depthCapture,
             MinecraftControl control,
             MinecraftActions actions,
             MinecraftChatBridge chatBridge
     ) {
+        this.simulationClock = simulationClock;
         this.frameCapture = frameCapture;
         this.depthCapture = depthCapture;
         this.control = control;
@@ -141,8 +144,10 @@ public final class LocalCommandServer implements AutoCloseable {
         String command = requiredString(request, "cmd");
         return switch (command) {
             case "observe" -> observe();
+            case "clock" -> minecraftCall(() -> simulationClock.describe(Minecraft.getInstance()));
             case "snapshot" -> CompletableFuture.completedFuture(snapshot());
             case "depth_snapshot" -> CompletableFuture.completedFuture(depthSnapshot());
+            case "rgbd_snapshot" -> CompletableFuture.completedFuture(rgbdSnapshot());
             case "lidar_scan" -> lidarScan(
                     request.has("ray_count") ? request.get("ray_count").getAsInt() : 180,
                     request.has("range_max") ? request.get("range_max").getAsDouble() : 16.0);
@@ -217,12 +222,12 @@ public final class LocalCommandServer implements AutoCloseable {
     }
 
     /** Schedules observation creation on the Minecraft client thread. */
-    private static CompletableFuture<JsonObject> observe() {
+    private CompletableFuture<JsonObject> observe() {
         CompletableFuture<JsonObject> result = new CompletableFuture<>();
         Minecraft minecraft = Minecraft.getInstance();
         minecraft.execute(() -> {
             try {
-                result.complete(ObservationFactory.create(minecraft));
+                result.complete(ObservationFactory.create(minecraft, simulationClock));
             } catch (Exception exception) {
                 result.completeExceptionally(exception);
             }
@@ -231,12 +236,27 @@ public final class LocalCommandServer implements AutoCloseable {
     }
 
     /** Schedules collision raycasts on the Minecraft client thread. */
-    private static CompletableFuture<JsonObject> lidarScan(int rayCount, double rangeMax) {
+    private CompletableFuture<JsonObject> lidarScan(int rayCount, double rangeMax) {
         CompletableFuture<JsonObject> result = new CompletableFuture<>();
         Minecraft minecraft = Minecraft.getInstance();
         minecraft.execute(() -> {
             try {
-                result.complete(LidarScan.capture(minecraft, rayCount, rangeMax));
+                result.complete(LidarScan.capture(minecraft, simulationClock, rayCount, rangeMax));
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
+    }
+
+    /** Run one small world query on the client thread. */
+    private static CompletableFuture<JsonObject> minecraftCall(
+            java.util.concurrent.Callable<JsonObject> call
+    ) {
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        Minecraft.getInstance().execute(() -> {
+            try {
+                result.complete(call.call());
             } catch (Exception exception) {
                 result.completeExceptionally(exception);
             }
@@ -259,6 +279,8 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("type", "first_person_rendered");
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
+        view.addProperty("tickId", frame.tickId());
+        view.addProperty("simTimeNanos", frame.simTimeNanos());
         view.addProperty("timestampMs", frame.timestampMs());
         view.add("image", image);
         JsonObject result = new JsonObject();
@@ -281,12 +303,29 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("type", "first_person_depth");
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
+        view.addProperty("tickId", frame.tickId());
+        view.addProperty("simTimeNanos", frame.simTimeNanos());
         view.addProperty("timestampMs", frame.timestampMs());
         view.addProperty("verticalFovDeg", Minecraft.getInstance().options.fov().get());
         view.addProperty("unit", "metre");
         view.add("image", image);
         JsonObject result = new JsonObject();
         result.add("depthView", view);
+        return result;
+    }
+
+    /** Return only a capture-time-matched RGB/depth pair. */
+    private JsonObject rgbdSnapshot() {
+        JsonObject rgb = snapshot();
+        JsonObject depth = depthSnapshot();
+        JsonObject rendered = rgb.getAsJsonObject("renderedView");
+        JsonObject depthView = depth.getAsJsonObject("depthView");
+        if (rendered.get("tickId").getAsLong() != depthView.get("tickId").getAsLong()) {
+            throw new IllegalStateException("latest RGB and depth frames are from different simulation ticks");
+        }
+        JsonObject result = new JsonObject();
+        result.add("renderedView", rendered);
+        result.add("depthView", depthView);
         return result;
     }
 

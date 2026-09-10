@@ -3,6 +3,15 @@ config:
   # Maximum time to wait for the Forge client Mod to join a world.
   ready_timeout_ms: 30000
 
+  # boolean, default: false.
+  # Use Minecraft's authoritative 20 Hz gameTime clock for every sensor,
+  # odometry, TF, and ground-truth header, and publish it on ROS /clock.
+  use_sim_time: false
+
+  # string, ROS topic, default: /minecraft/ground_truth/pose.
+  # Exact Minecraft pose for benchmark scoring; never use it as a SLAM input.
+  ground_truth_topic: /minecraft/ground_truth/pose
+
   # string, ROS frame ID, default: minecraft_camera_optical_frame.
   # Optical frame assigned to RGB, depth, camera calibration, and the static
   # base-frame transform; initialization fails when ROS 2 rejects the

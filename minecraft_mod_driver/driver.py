@@ -49,22 +49,27 @@ intrinsics_publisher = None
 odom_publisher = None
 objects_publisher = None
 lidar_publisher = None
+clock_publisher = None
+ground_truth_publisher = None
 odom_transform_broadcaster = None
 static_transform_broadcaster = None
 cmd_vel_subscription = None
 camera_stream_stop = threading.Event()
 odom_stream_stop = threading.Event()
 lidar_stream_stop = threading.Event()
+clock_stream_stop = threading.Event()
 cmd_vel_bridge_stop = threading.Event()
 camera_stream_thread: threading.Thread | None = None
 odom_stream_thread: threading.Thread | None = None
 lidar_stream_thread: threading.Thread | None = None
+clock_stream_thread: threading.Thread | None = None
 cmd_vel_bridge_thread: threading.Thread | None = None
 camera_lifecycle_lock = threading.Lock()
 chassis_lifecycle_lock = threading.Lock()
 camera_worker_lock = threading.Lock()
 odom_worker_lock = threading.Lock()
 lidar_worker_lock = threading.Lock()
+clock_worker_lock = threading.Lock()
 cmd_vel_worker_lock = threading.Lock()
 cmd_vel_state_lock = threading.Lock()
 stream_error_lock = threading.Lock()
@@ -124,6 +129,8 @@ cmd_vel_max_angular = 1.0
 route_inspection_half_width_m = 0.8
 route_inspection_sample_spacing_m = 0.25
 route_inspection_max_blocks = 64
+use_sim_time = False
+ground_truth_topic = "/minecraft/ground_truth/pose"
 
 
 class MinecraftModClient:
@@ -226,14 +233,36 @@ def persist_observation(observation: dict[str, Any]) -> None:
 def now_header(frame_id: str, timestamp_sec: float | None = None) -> std_msgs_mcp.Header:
     """Build an image header using a valid capture time or the current time."""
     now = timestamp_sec if timestamp_sec is not None and math.isfinite(timestamp_sec) else time.time()
-    if now <= 0.0:
+    if now < 0.0:
         now = time.time()
-    sec = int(now)
-    nanosec = int((now % 1) * 1e9) % 1_000_000_000
+    sec, nanosec = split_timestamp(now)
     return std_msgs_mcp.Header(
         stamp=builtin_interfaces_mcp.Time(sec=sec, nanosec=nanosec),
         frame_id=frame_id,
     )
+
+
+def split_timestamp(timestamp_sec: float) -> tuple[int, int]:
+    """Split seconds with rounding so integer-nanosecond inputs survive float transport."""
+    sec = math.floor(timestamp_sec)
+    nanosec = round((timestamp_sec - sec) * 1_000_000_000)
+    if nanosec >= 1_000_000_000:
+        sec += 1
+        nanosec -= 1_000_000_000
+    return sec, nanosec
+
+
+def capture_timestamp(payload: dict[str, Any]) -> float | None:
+    """Return the selected capture clock without confusing it with publication time."""
+    if use_sim_time:
+        raw = payload.get("simTimeNanos")
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ValueError("simulation capture requires a non-negative integer simTimeNanos")
+        return raw / 1_000_000_000.0
+    raw_ms = payload.get("timestampMs")
+    if raw_ms is None:
+        return None
+    return float(raw_ms) / 1000.0
 
 
 def image_error(message: str) -> Image:
@@ -260,7 +289,7 @@ def rendered_view_to_image(result: dict[str, Any]) -> Image:
         return image_error("renderedView JPEG image missing")
     raw = base64.b64decode(data_url[len(prefix):], validate=True)
     return Image(
-        header=now_header(camera_frame_id, float(view.get("timestampMs") or 0) / 1000.0),
+        header=now_header(camera_frame_id, capture_timestamp(view)),
         height=int(view.get("height") or 0),
         width=int(view.get("width") or 0),
         encoding="jpeg",
@@ -310,7 +339,7 @@ def depth_view_to_image(result: dict[str, Any]) -> Image:
     if width < 1 or height < 1 or len(raw) != width * height * 4:
         return image_error("depthView 32FC1 dimensions or payload are invalid")
     return Image(
-        header=now_header(camera_frame_id, float(view.get("timestampMs") or 0) / 1000.0),
+        header=now_header(camera_frame_id, capture_timestamp(view)),
         height=height,
         width=width,
         encoding="32FC1",
@@ -329,7 +358,6 @@ def lidar_scan_values(result: dict[str, Any]) -> dict[str, Any]:
     values = {
         name: float(scan.get(source))
         for name, source in (
-            ("timestamp", "timestampMs"),
             ("angle_min", "angleMin"),
             ("angle_max", "angleMax"),
             ("angle_increment", "angleIncrement"),
@@ -337,10 +365,14 @@ def lidar_scan_values(result: dict[str, Any]) -> dict[str, Any]:
             ("range_max", "rangeMax"),
         )
     }
+    timestamp = capture_timestamp(scan)
+    if timestamp is None:
+        raise ValueError("lidar timestamp is missing")
+    values["timestamp"] = timestamp
     if not all(math.isfinite(value) for value in values.values()):
         raise ValueError("lidar scan metadata must be finite")
-    if values["timestamp"] <= 0.0:
-        raise ValueError("lidar timestamp must be positive")
+    if values["timestamp"] < 0.0:
+        raise ValueError("lidar timestamp must be non-negative")
     if values["angle_increment"] <= 0.0:
         raise ValueError("lidar angle increment must be positive")
     if not 0.0 <= values["range_min"] < values["range_max"]:
@@ -357,7 +389,6 @@ def lidar_scan_values(result: dict[str, Any]) -> dict[str, Any]:
         if not math.isfinite(distance) or distance < 0.0:
             raise ValueError("lidar ranges must be finite non-negative values or null")
         ranges.append(distance)
-    values["timestamp"] /= 1000.0
     values["ranges"] = ranges
     return values
 
@@ -371,8 +402,7 @@ def publish_lidar_scan(result: dict[str, Any]) -> None:
     values = lidar_scan_values(result)
     message = LaserScan()
     timestamp = values["timestamp"]
-    message.header.stamp.sec = int(timestamp)
-    message.header.stamp.nanosec = int((timestamp % 1.0) * 1e9)
+    message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp(timestamp)
     message.header.frame_id = lidar_frame_id
     message.angle_min = values["angle_min"]
     message.angle_max = values["angle_max"]
@@ -438,6 +468,11 @@ def observation_pose(observation: dict[str, Any]) -> tuple[float, float, float, 
 
 def observation_timestamp(observation: dict[str, Any]) -> float:
     """Parse the client-thread observation time as Unix seconds for ROS headers."""
+    if use_sim_time:
+        raw_sim = observation.get("simTimeNanos")
+        if isinstance(raw_sim, bool) or not isinstance(raw_sim, int) or raw_sim < 0:
+            raise ValueError("Minecraft observation simTimeNanos is invalid")
+        return raw_sim / 1_000_000_000.0
     raw = str(observation.get("timestamp") or "")
     try:
         captured = datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -558,9 +593,8 @@ def publish_extrinsics() -> None:
     from geometry_msgs.msg import TransformStamped  # type: ignore
 
     message = TransformStamped()
-    now = time.time()
-    message.header.stamp.sec = int(now)
-    message.header.stamp.nanosec = int((now % 1.0) * 1e9)
+    now = 0.0 if use_sim_time else time.time()
+    message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp(now)
     message.header.frame_id = base_frame_id
     message.child_frame_id = camera_frame_id
     message.transform.rotation.x = -0.5
@@ -637,8 +671,7 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
     previous_odom_sample = (now, x, y, yaw)
 
     message = Odometry()
-    message.header.stamp.sec = int(now)
-    message.header.stamp.nanosec = int((now % 1.0) * 1e9)
+    message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp(now)
     message.header.frame_id = odom_frame_id
     message.child_frame_id = base_frame_id
     message.pose.pose.position.x = x
@@ -668,6 +701,16 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
     transform.transform.rotation.w = message.pose.pose.orientation.w
     odom_transform_broadcaster.sendTransform(transform)
 
+    if ground_truth_publisher is not None:
+        from geometry_msgs.msg import PoseStamped  # type: ignore
+
+        truth = PoseStamped()
+        truth.header.stamp.sec = message.header.stamp.sec
+        truth.header.stamp.nanosec = message.header.stamp.nanosec
+        truth.header.frame_id = odom_frame_id
+        truth.pose = message.pose.pose
+        ground_truth_publisher.publish(truth)
+
 
 def configured_frequency(name: str, fallback: float) -> float:
     """Read one stream frequency and require a finite rate from 0.1 through 60 Hz."""
@@ -675,6 +718,19 @@ def configured_frequency(name: str, fallback: float) -> float:
     if not math.isfinite(value) or not 0.1 <= value <= 60.0:
         raise ValueError(f"{name} must be finite and from 0.1 through 60")
     return value
+
+
+def configured_use_sim_time(config: dict[str, Any]) -> bool:
+    """Read an explicit boolean; silently accepting truthy strings is unsafe."""
+    raw = config.get("use_sim_time", os.environ.get("RBNX_MINECRAFT_USE_SIM_TIME", "false"))
+    if isinstance(raw, bool):
+        return raw
+    normalized = str(raw).strip().casefold()
+    if normalized in {"true", "1"}:
+        return True
+    if normalized in {"false", "0"}:
+        return False
+    raise ValueError("use_sim_time must be a boolean")
 
 
 def configured_lidar_ray_count(config: dict[str, Any]) -> int:
@@ -868,27 +924,76 @@ def camera_stream_loop() -> None:
     interval = 1.0 / camera_stream_hz
     while not camera_stream_stop.is_set():
         started = time.monotonic()
-        try:
-            rgb = rendered_view_to_rgb_image(client.request({"cmd": "snapshot"}))
-            publish_ros_image(rgb_publisher, rgb)
-        except Exception as exc:  # noqa: BLE001
-            log_stream_error("RGB", exc)
-        if camera_stream_stop.is_set():
-            break
-        try:
-            depth_result = client.request({"cmd": "depth_snapshot"})
-            depth = depth_view_to_image(depth_result)
-            depth_view = depth_result.get("depthView") or {}
-            publish_intrinsics(
-                depth.width,
-                depth.height,
-                float(depth_view.get("verticalFovDeg") or 0.0),
-                depth.header.stamp,
-            )
-            publish_ros_image(depth_publisher, depth)
-        except Exception as exc:  # noqa: BLE001
-            log_stream_error("depth", exc)
+        if use_sim_time:
+            try:
+                depth_result = client.request({"cmd": "rgbd_snapshot"})
+                rgb = rendered_view_to_rgb_image(depth_result)
+                depth = depth_view_to_image(depth_result)
+                if (
+                    rgb.header.stamp.sec != depth.header.stamp.sec
+                    or rgb.header.stamp.nanosec != depth.header.stamp.nanosec
+                ):
+                    raise ValueError("RGB and depth simulation capture stamps differ")
+                publish_ros_image(rgb_publisher, rgb)
+                depth_view = depth_result.get("depthView") or {}
+                publish_intrinsics(
+                    depth.width,
+                    depth.height,
+                    float(depth_view.get("verticalFovDeg") or 0.0),
+                    depth.header.stamp,
+                )
+                publish_ros_image(depth_publisher, depth)
+            except Exception as exc:  # noqa: BLE001
+                log_stream_error("RGB-D", exc)
+        else:
+            try:
+                rgb = rendered_view_to_rgb_image(client.request({"cmd": "snapshot"}))
+                publish_ros_image(rgb_publisher, rgb)
+            except Exception as exc:  # noqa: BLE001
+                log_stream_error("RGB", exc)
+            if camera_stream_stop.is_set():
+                break
+            try:
+                depth_result = client.request({"cmd": "depth_snapshot"})
+                depth = depth_view_to_image(depth_result)
+                depth_view = depth_result.get("depthView") or {}
+                publish_intrinsics(
+                    depth.width,
+                    depth.height,
+                    float(depth_view.get("verticalFovDeg") or 0.0),
+                    depth.header.stamp,
+                )
+                publish_ros_image(depth_publisher, depth)
+            except Exception as exc:  # noqa: BLE001
+                log_stream_error("depth", exc)
         camera_stream_stop.wait(max(0.0, interval - (time.monotonic() - started)))
+
+
+def publish_clock_sample(last_nanos: int = -1) -> int:
+    """Publish one checked clock sample and return its exact integer time."""
+    from rosgraph_msgs.msg import Clock  # type: ignore
+
+    result = client.request({"cmd": "clock"})
+    raw = result.get("simTimeNanos")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < last_nanos:
+        raise ValueError("Minecraft simulation clock is missing or moved backwards")
+    message = Clock()
+    message.clock.sec = raw // 1_000_000_000
+    message.clock.nanosec = raw % 1_000_000_000
+    clock_publisher.publish(message)
+    return raw
+
+
+def clock_stream_loop() -> None:
+    """Publish the authoritative Minecraft tick clock independently of sensor work."""
+    last_nanos = -1
+    while not clock_stream_stop.is_set():
+        started = time.monotonic()
+        try:
+            last_nanos = publish_clock_sample(last_nanos)
+        except Exception as exc:  # noqa: BLE001
+            log_stream_error("clock", exc)
+        clock_stream_stop.wait(max(0.0, 0.02 - (time.monotonic() - started)))
 
 
 def odom_stream_loop() -> None:
@@ -945,6 +1050,24 @@ def start_camera_stream() -> None:
         camera_stream_thread.start()
 
 
+def start_clock_stream() -> None:
+    """Start the sole /clock publisher when simulation time is enabled."""
+    global clock_stream_thread
+    if not use_sim_time:
+        return
+    with clock_worker_lock:
+        if clock_stream_thread is not None and clock_stream_thread.is_alive():
+            return
+        clock_stream_stop.clear()
+        publish_clock_sample()
+        clock_stream_thread = threading.Thread(
+            target=clock_stream_loop,
+            name="minecraft-simulation-clock",
+            daemon=True,
+        )
+        clock_stream_thread.start()
+
+
 def start_odom_stream() -> None:
     """Start one odometry publisher worker with fresh velocity state."""
     global odom_stream_thread, previous_odom_sample
@@ -998,6 +1121,17 @@ def stop_camera_stream() -> bool:
     with camera_worker_lock:
         camera_stream_stop.set()
         worker = camera_stream_thread
+        if worker is None or worker is threading.current_thread():
+            return True
+        worker.join(timeout=client.timeout + 1.0)
+        return not worker.is_alive()
+
+
+def stop_clock_stream() -> bool:
+    """Stop publishing /clock before the provider leaves the simulation graph."""
+    with clock_worker_lock:
+        clock_stream_stop.set()
+        worker = clock_stream_thread
         if worker is None or worker is threading.current_thread():
             return True
         worker.join(timeout=client.timeout + 1.0)
@@ -1922,7 +2056,7 @@ def init_mod(config: dict[str, Any]):
 def initialize_camera(config: dict[str, Any]):
     """Initialize camera streams and the colocated chassis after Mod readiness."""
     global rgb_publisher, depth_publisher, extrinsics_publisher, intrinsics_publisher
-    global objects_publisher, lidar_publisher
+    global objects_publisher, lidar_publisher, clock_publisher, use_sim_time
     global static_transform_broadcaster
     global camera_frame_id, base_frame_id, lidar_frame_id, eye_height
     global rgb_topic, depth_topic, extrinsics_topic, intrinsics_topic
@@ -1953,6 +2087,7 @@ def initialize_camera(config: dict[str, Any]):
         from sensor_msgs.msg import CameraInfo, Image as RosImage, LaserScan  # type: ignore
         from std_msgs.msg import String  # type: ignore
 
+        use_sim_time = configured_use_sim_time(config)
         camera_stream_hz = configured_frequency("RBNX_MINECRAFT_CAMERA_STREAM_HZ", 5.0)
         odom_stream_hz = configured_frequency("RBNX_MINECRAFT_ODOM_HZ", 10.0)
         lidar_stream_hz = configured_frequency("RBNX_MINECRAFT_LIDAR_HZ", 5.0)
@@ -2038,6 +2173,10 @@ def initialize_camera(config: dict[str, Any]):
         static_transform_broadcaster = StaticTransformBroadcaster(
             RosBackend.get().node,
         )
+        if use_sim_time and clock_publisher is None:
+            from rosgraph_msgs.msg import Clock  # type: ignore
+
+            clock_publisher = RosBackend.get().node.create_publisher(Clock, "/clock", 10)
         publish_extrinsics()
     except Exception as exc:  # noqa: BLE001
         return Err(f"ROS2 camera stream initialization failed: {exc}")
@@ -2064,24 +2203,29 @@ def activate_camera():
             extrinsics_publisher,
             intrinsics_publisher,
             lidar_publisher,
-        )):
+        )) or (use_sim_time and clock_publisher is None):
             return Err("camera and lidar streams are not initialized")
-        chassis_result = activate_chassis()
-        if isinstance(chassis_result, Err):
-            return chassis_result
         try:
             publish_extrinsics()
+            start_clock_stream()
+            chassis_result = activate_chassis()
+            if isinstance(chassis_result, Err):
+                stop_clock_stream()
+                return chassis_result
             start_camera_stream()
             start_lidar_stream()
         except Exception as exc:  # noqa: BLE001
             camera_stopped = stop_camera_stream()
             lidar_stopped = stop_lidar_stream()
+            clock_stopped = stop_clock_stream()
             rollback = deactivate_chassis()
             detail = f"camera stream activation failed: {exc}"
             if not camera_stopped:
                 detail += "; camera worker rollback timed out"
             if not lidar_stopped:
                 detail += "; lidar worker rollback timed out"
+            if not clock_stopped:
+                detail += "; clock worker rollback timed out"
             if isinstance(rollback, Err):
                 detail += f"; chassis rollback failed: {rollback.message}"
             return Err(detail)
@@ -2094,11 +2238,14 @@ def deactivate_camera():
     with camera_lifecycle_lock:
         camera_stopped = stop_camera_stream()
         lidar_stopped = stop_lidar_stream()
+        clock_stopped = stop_clock_stream()
         chassis_result = deactivate_chassis()
     if not camera_stopped:
         return Err("camera stream worker did not stop before timeout")
     if not lidar_stopped:
         return Err("lidar stream worker did not stop before timeout")
+    if not clock_stopped:
+        return Err("clock stream worker did not stop before timeout")
     if isinstance(chassis_result, Err):
         return chassis_result
     return Ok()
@@ -2110,11 +2257,14 @@ def shutdown_camera():
     with camera_lifecycle_lock:
         camera_stopped = stop_camera_stream()
         lidar_stopped = stop_lidar_stream()
+        clock_stopped = stop_clock_stream()
         chassis_result = shutdown_chassis()
     if not camera_stopped:
         return Err("camera stream worker did not stop before timeout")
     if not lidar_stopped:
         return Err("lidar stream worker did not stop before timeout")
+    if not clock_stopped:
+        return Err("clock stream worker did not stop before timeout")
     if isinstance(chassis_result, Err):
         return chassis_result
     return Ok()
@@ -2123,6 +2273,7 @@ def shutdown_camera():
 def initialize_chassis(config: dict[str, Any]):
     """Initialize the ROS odometry publisher under the chassis namespace."""
     global odom_publisher, odom_transform_broadcaster, cmd_vel_subscription
+    global ground_truth_publisher, ground_truth_topic
     global odom_topic, odom_frame_id, base_frame_id
     global cmd_vel_topic, cmd_vel_command_duration_sec, cmd_vel_timeout_sec
     global cmd_vel_max_linear, cmd_vel_max_angular
@@ -2132,7 +2283,7 @@ def initialize_chassis(config: dict[str, Any]):
     if isinstance(ready, Err):
         return ready
     try:
-        from geometry_msgs.msg import Twist  # type: ignore
+        from geometry_msgs.msg import PoseStamped, Twist  # type: ignore
         from nav_msgs.msg import Odometry  # type: ignore
 
         odom_topic = str(config.get("odom_topic") or os.environ.get(
@@ -2143,6 +2294,9 @@ def initialize_chassis(config: dict[str, Any]):
         ))
         base_frame_id = str(config.get("base_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_BASE_FRAME_ID", base_frame_id,
+        ))
+        ground_truth_topic = str(config.get("ground_truth_topic") or os.environ.get(
+            "RBNX_MINECRAFT_GROUND_TRUTH_TOPIC", ground_truth_topic,
         ))
         (
             cmd_vel_topic,
@@ -2157,6 +2311,10 @@ def initialize_chassis(config: dict[str, Any]):
                 topic=odom_topic,
                 msg_type=Odometry,
                 qos="reliable",
+            )
+        if ground_truth_publisher is None:
+            ground_truth_publisher = RosBackend.get().node.create_publisher(
+                PoseStamped, ground_truth_topic, 10,
             )
         if cmd_vel_subscription is None:
             cmd_vel_subscription = RosBackend.get().node.create_subscription(

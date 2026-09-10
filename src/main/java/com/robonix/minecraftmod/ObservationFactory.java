@@ -41,8 +41,13 @@ public final class ObservationFactory {
 
     private ObservationFactory() {}
 
-    /** Captures player state and a bounded surface-block scan on the client thread. */
+    /** Compatibility entry point for action responses; the clock is stateless. */
     public static JsonObject create(Minecraft minecraft) {
+        return create(minecraft, new SimulationClock());
+    }
+
+    /** Captures player state and a bounded surface-block scan on the client thread. */
+    public static JsonObject create(Minecraft minecraft, SimulationClock simulationClock) {
         LocalPlayer player = minecraft.player;
         ClientLevel level = minecraft.level;
         if (player == null || level == null) {
@@ -50,9 +55,12 @@ public final class ObservationFactory {
         }
 
         Instant capturedAt = Instant.now();
+        SimulationClock.SampleContext sample = simulationClock.capture(minecraft);
         JsonObject observation = new JsonObject();
         observation.addProperty("schemaVersion", 1);
         observation.addProperty("timestamp", capturedAt.toString());
+        observation.addProperty("tickId", sample.tickId());
+        observation.addProperty("simTimeNanos", sample.simTimeNanos());
         observation.addProperty("coordinateFrame", "minecraft_world");
         observation.add("units", units());
         observation.addProperty("username", player.getGameProfile().getName());

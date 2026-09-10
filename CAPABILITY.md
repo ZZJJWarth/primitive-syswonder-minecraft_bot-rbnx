@@ -64,6 +64,9 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     during deactivation, or during shutdown.
   - Shares the aggregate `minecraft_mod` provider and Forge client connection
     with the camera, lidar, perception, and Minecraft action capabilities.
+  - In `use_sim_time` mode, the provider publishes Minecraft `gameTime` on
+    `/clock`, stamps all streams with the capture tick, and publishes an exact
+    scoring-only pose on `/minecraft/ground_truth/pose`.
 - `robonix/primitive/perception/objects`
   - Is declared by the aggregate `minecraft_mod` provider.
   - Publishes the complete set of locally discovered chest, trapped chest,

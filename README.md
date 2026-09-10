@@ -308,6 +308,13 @@ that process itself. Only one wrapper may use a display at a time. Set
   valid range `16` through `1440`.
 - `RBNX_MINECRAFT_LIDAR_RANGE_MAX`: maximum collision-ray distance in metres,
   default `16`; valid range `1` through `64`.
+- `RBNX_MINECRAFT_USE_SIM_TIME`: when `true`, publishes Minecraft's monotonic
+  `gameTime` on `/clock` and stamps RGB, depth, CameraInfo, LiDAR, odometry,
+  TF, and ground truth from that clock. RGB-D output is rejected unless both
+  latest frames belong to the same game tick. Default `false` preserves the
+  wall-clock deployment mode.
+- `RBNX_MINECRAFT_GROUND_TRUTH_TOPIC`: exact pose stream reserved for benchmark
+  scoring, default `/minecraft/ground_truth/pose`.
 - `RBNX_MINECRAFT_RGB_TOPIC`, `RBNX_MINECRAFT_DEPTH_TOPIC`,
   `RBNX_MINECRAFT_EXTRINSICS_TOPIC`, `RBNX_MINECRAFT_INTRINSICS_TOPIC`,
   `RBNX_MINECRAFT_ODOM_TOPIC`, `RBNX_MINECRAFT_LIDAR_TOPIC`,

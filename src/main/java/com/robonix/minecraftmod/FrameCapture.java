@@ -23,6 +23,7 @@ import net.minecraftforge.client.event.ScreenEvent;
 
 /** Captures the final client framebuffer and retains the latest JPEG frame. */
 public final class FrameCapture implements AutoCloseable {
+    private final SimulationClock simulationClock;
     private final AtomicReference<Frame> latest = new AtomicReference<>();
     private final AtomicBoolean encoding = new AtomicBoolean(false);
     private final ExecutorService encoder = Executors.newSingleThreadExecutor(runnable -> {
@@ -36,6 +37,10 @@ public final class FrameCapture implements AutoCloseable {
     private final int outputHeight = Math.min(envInt("RBNX_MINECRAFT_CAPTURE_HEIGHT", 540), 2160);
     private final float jpegQuality = envFloat("RBNX_MINECRAFT_JPEG_QUALITY", 0.8F);
     private long lastCaptureNanos;
+
+    public FrameCapture(SimulationClock simulationClock) {
+        this.simulationClock = simulationClock;
+    }
 
     /** Reads a frame on the render thread at a bounded rate and encodes it asynchronously. */
     public void onRenderGui(RenderGuiEvent.Post event) {
@@ -58,9 +63,11 @@ public final class FrameCapture implements AutoCloseable {
         lastCaptureNanos = now;
         NativeImage image = null;
         try {
+            SimulationClock.SampleContext sample = simulationClock.capture(Minecraft.getInstance());
+            long capturedWallMillis = System.currentTimeMillis();
             image = Screenshot.takeScreenshot(Minecraft.getInstance().getMainRenderTarget());
             NativeImage ownedImage = image;
-            encoder.execute(() -> encode(ownedImage));
+            encoder.execute(() -> encode(ownedImage, sample, capturedWallMillis, now));
         } catch (RuntimeException exception) {
             if (image != null) {
                 image.close();
@@ -74,18 +81,25 @@ public final class FrameCapture implements AutoCloseable {
     public Frame latest() {
         Frame frame = latest.get();
         long maxAgeMillis = Math.max(5000L, TimeUnit.NANOSECONDS.toMillis(intervalNanos) * 3L);
-        if (frame == null || System.currentTimeMillis() - frame.timestampMs() > maxAgeMillis) {
+        if (frame == null || System.nanoTime() - frame.capturedWallNanos()
+                > TimeUnit.MILLISECONDS.toNanos(maxAgeMillis)) {
             return null;
         }
         return frame;
     }
 
     /** Converts one owned native image to a scaled JPEG and releases native memory. */
-    private void encode(NativeImage image) {
+    private void encode(
+            NativeImage image,
+            SimulationClock.SampleContext sample,
+            long capturedWallMillis,
+            long capturedWallNanos
+    ) {
         try (image) {
             BufferedImage buffered = scale(image, outputWidth, outputHeight);
             byte[] data = writeJpeg(buffered, jpegQuality);
-            latest.set(new Frame(data, buffered.getWidth(), buffered.getHeight(), System.currentTimeMillis()));
+            latest.set(new Frame(data, buffered.getWidth(), buffered.getHeight(),
+                    sample.tickId(), sample.simTimeNanos(), capturedWallMillis, capturedWallNanos));
         } catch (Exception exception) {
             RobonixMinecraftMod.LOGGER.error("Failed to encode Minecraft frame", exception);
         } finally {
@@ -168,5 +182,13 @@ public final class FrameCapture implements AutoCloseable {
     }
 
     /** Immutable encoded camera frame shared with command connections. */
-    public record Frame(byte[] data, int width, int height, long timestampMs) {}
+    public record Frame(
+            byte[] data,
+            int width,
+            int height,
+            long tickId,
+            long simTimeNanos,
+            long timestampMs,
+            long capturedWallNanos
+    ) {}
 }

@@ -20,6 +20,7 @@ import org.lwjgl.system.MemoryUtil;
 public final class DepthCapture implements AutoCloseable {
     private static final float NEAR_PLANE = 0.05F;
     private static final int MAX_CAPTURE_PIXELS = 3840 * 2160;
+    private final SimulationClock simulationClock;
     private final AtomicReference<Frame> latest = new AtomicReference<>();
     private final AtomicBoolean processing = new AtomicBoolean(false);
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -33,6 +34,10 @@ public final class DepthCapture implements AutoCloseable {
     private final int outputWidth = Math.min(envInt("RBNX_MINECRAFT_CAPTURE_WIDTH", 960), 3840);
     private final int outputHeight = Math.min(envInt("RBNX_MINECRAFT_CAPTURE_HEIGHT", 540), 2160);
     private long lastCaptureNanos;
+
+    public DepthCapture(SimulationClock simulationClock) {
+        this.simulationClock = simulationClock;
+    }
 
     /** Reads world depth after level rendering and before GUI overlays. */
     public void onRenderLevel(RenderLevelStageEvent event) {
@@ -51,7 +56,8 @@ public final class DepthCapture implements AutoCloseable {
     public Frame latest() {
         Frame frame = latest.get();
         long maxAgeMillis = Math.max(5000L, TimeUnit.NANOSECONDS.toMillis(intervalNanos) * 3L);
-        if (frame == null || System.currentTimeMillis() - frame.timestampMs() > maxAgeMillis) {
+        if (frame == null || System.nanoTime() - frame.capturedWallNanos()
+                > TimeUnit.MILLISECONDS.toNanos(maxAgeMillis)) {
             return null;
         }
         return frame;
@@ -60,6 +66,9 @@ public final class DepthCapture implements AutoCloseable {
     /** Copies GPU depth on the render thread and schedules CPU linearization. */
     private void readDepthBuffer() {
         Minecraft minecraft = Minecraft.getInstance();
+        SimulationClock.SampleContext sample = simulationClock.capture(minecraft);
+        long capturedWallMillis = System.currentTimeMillis();
+        long capturedWallNanos = System.nanoTime();
         RenderTarget target = minecraft.getMainRenderTarget();
         int width = target.viewWidth;
         int height = target.viewHeight;
@@ -86,8 +95,9 @@ public final class DepthCapture implements AutoCloseable {
             float[] depth = new float[pixelCount];
             buffer.get(depth);
             float farPlane = minecraft.gameRenderer.getDepthFar();
-            long timestampMs = System.currentTimeMillis();
-            converter.execute(() -> convert(depth, width, height, farPlane, timestampMs));
+            converter.execute(() -> convert(
+                    depth, width, height, farPlane, sample,
+                    capturedWallMillis, capturedWallNanos));
         } catch (RuntimeException | OutOfMemoryError exception) {
             processing.set(false);
             RobonixMinecraftMod.LOGGER.error("Failed to read Minecraft depth buffer", exception);
@@ -122,7 +132,9 @@ public final class DepthCapture implements AutoCloseable {
             int sourceWidth,
             int sourceHeight,
             float farPlane,
-            long timestampMs
+            SimulationClock.SampleContext sample,
+            long capturedWallMillis,
+            long capturedWallNanos
     ) {
         try {
             double scale = Math.min(1.0, Math.min(
@@ -142,7 +154,9 @@ public final class DepthCapture implements AutoCloseable {
                 }
             }
             if (!closed.get() && !Thread.currentThread().isInterrupted()) {
-                latest.set(new Frame(output.array(), width, height, timestampMs));
+                latest.set(new Frame(output.array(), width, height,
+                        sample.tickId(), sample.simTimeNanos(),
+                        capturedWallMillis, capturedWallNanos));
             }
         } catch (RuntimeException | OutOfMemoryError exception) {
             RobonixMinecraftMod.LOGGER.error("Failed to convert Minecraft depth buffer", exception);
@@ -188,5 +202,13 @@ public final class DepthCapture implements AutoCloseable {
     }
 
     /** Immutable raw depth image shared with command connections. */
-    public record Frame(byte[] data, int width, int height, long timestampMs) {}
+    public record Frame(
+            byte[] data,
+            int width,
+            int height,
+            long tickId,
+            long simTimeNanos,
+            long timestampMs,
+            long capturedWallNanos
+    ) {}
 }

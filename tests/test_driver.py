@@ -30,6 +30,7 @@ from minecraft_mod_driver.driver import (
     configured_lidar_range,
     configured_lidar_ray_count,
     configured_route_inspection,
+    configured_use_sim_time,
     depth_view_to_image,
     execute_move_command,
     observation_pose,
@@ -211,6 +212,14 @@ class MinecraftModClientTest(unittest.TestCase):
             configured_lidar_ray_count({"lidar_ray_count": 8})
         with self.assertRaisesRegex(ValueError, "1 through 64"):
             configured_lidar_range({"lidar_range_max": float("inf")})
+
+    def test_sim_time_configuration_is_explicit(self) -> None:
+        """Do not accidentally enable the graph clock for arbitrary truthy values."""
+        self.assertTrue(configured_use_sim_time({"use_sim_time": True}))
+        self.assertTrue(configured_use_sim_time({"use_sim_time": "1"}))
+        self.assertFalse(configured_use_sim_time({"use_sim_time": False}))
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            configured_use_sim_time({"use_sim_time": "yes"})
 
     def test_cmd_vel_bridge_configuration_is_bounded(self) -> None:
         """Reject ambiguous topics and unsafe command/deadman limits."""
@@ -1204,6 +1213,43 @@ class MinecraftModClientTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "timestamp"):
             observation_timestamp({"timestamp": ""})
 
+    def test_simulation_capture_time_uses_integer_nanoseconds(self) -> None:
+        """Use gameTime in sim mode and never fall back to a wall timestamp."""
+        with patch.object(driver, "use_sim_time", True):
+            self.assertEqual(
+                observation_timestamp({"simTimeNanos": 12_350_000_000}),
+                12.35,
+            )
+            with self.assertRaisesRegex(ValueError, "simTimeNanos"):
+                observation_timestamp({"timestamp": "2023-11-14T22:13:20Z"})
+
+    def test_clock_sample_preserves_nanoseconds_and_rejects_regression(self) -> None:
+        """Publish exact /clock fields without permitting time to move backwards."""
+        class FakeClock:
+            def __init__(self) -> None:
+                self.clock = SimpleNamespace(sec=0, nanosec=0)
+
+        rosgraph_msgs = ModuleType("rosgraph_msgs")
+        rosgraph_msgs_msg = ModuleType("rosgraph_msgs.msg")
+        rosgraph_msgs_msg.Clock = FakeClock
+        rosgraph_msgs.msg = rosgraph_msgs_msg
+        publisher = SimpleNamespace(publish=Mock())
+        with (
+            patch.dict(sys.modules, {
+                "rosgraph_msgs": rosgraph_msgs,
+                "rosgraph_msgs.msg": rosgraph_msgs_msg,
+            }),
+            patch.object(driver, "clock_publisher", publisher),
+            patch.object(driver.client, "request", return_value={
+                "simTimeNanos": 12_350_000_001,
+            }),
+        ):
+            self.assertEqual(driver.publish_clock_sample(12_350_000_000), 12_350_000_001)
+            message = publisher.publish.call_args.args[0]
+            self.assertEqual((message.clock.sec, message.clock.nanosec), (12, 350_000_001))
+            with self.assertRaisesRegex(ValueError, "backwards"):
+                driver.publish_clock_sample(12_350_000_002)
+
     def test_semantic_objects_payload_converts_block_centers_to_ros_enu(self) -> None:
         """Publish exact labels and centered block coordinates in the odometry frame."""
         payload = semantic_objects_payload({
@@ -1427,6 +1473,60 @@ class MinecraftModClientTest(unittest.TestCase):
             ),
         )
         publish_intrinsics.assert_called_once_with(1, 1, 70.0, stamp)
+
+    def test_sim_camera_stream_publishes_one_tick_matched_rgbd_group(self) -> None:
+        """Fetch RGB-D atomically and preserve one capture stamp through CameraInfo."""
+        buffer = BytesIO()
+        PILImage.new("RGB", (1, 1), (20, 40, 60)).save(buffer, format="JPEG")
+        sample = {
+            "renderedView": {
+                "width": 1,
+                "height": 1,
+                "tickId": 247,
+                "simTimeNanos": 12_350_000_000,
+                "image": {
+                    "dataUrl": "data:image/jpeg;base64,"
+                    + base64.b64encode(buffer.getvalue()).decode("ascii"),
+                },
+            },
+            "depthView": {
+                "width": 1,
+                "height": 1,
+                "tickId": 247,
+                "simTimeNanos": 12_350_000_000,
+                "verticalFovDeg": 70.0,
+                "image": {
+                    "encoding": "32FC1",
+                    "dataUrl": "data:application/octet-stream;base64,"
+                    + base64.b64encode(b"\x00\x00\x80?").decode("ascii"),
+                },
+            },
+        }
+        published: list[object] = []
+
+        def publish(_publisher, image) -> None:
+            published.append(image)
+            if len(published) == 2:
+                driver.camera_stream_stop.set()
+
+        driver.camera_stream_stop.clear()
+        try:
+            with (
+                patch.object(driver, "use_sim_time", True),
+                patch.object(driver.client, "request", return_value=sample) as request,
+                patch.object(driver, "publish_intrinsics") as intrinsics,
+                patch.object(driver, "publish_ros_image", side_effect=publish),
+            ):
+                driver.camera_stream_loop()
+        finally:
+            driver.camera_stream_stop.clear()
+        request.assert_called_once_with({"cmd": "rgbd_snapshot"})
+        self.assertEqual(
+            [(item.header.stamp.sec, item.header.stamp.nanosec) for item in published],
+            [(12, 350_000_000), (12, 350_000_000)],
+        )
+        stamp = intrinsics.call_args.args[3]
+        self.assertEqual((stamp.sec, stamp.nanosec), (12, 350_000_000))
 
     def test_publish_intrinsics_uses_depth_shape_and_vertical_fov(self) -> None:
         """Publish a latched-compatible pinhole matrix for the captured frame."""

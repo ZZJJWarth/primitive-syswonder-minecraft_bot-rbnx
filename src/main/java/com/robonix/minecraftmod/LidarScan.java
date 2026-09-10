@@ -21,7 +21,12 @@ public final class LidarScan {
     private LidarScan() {}
 
     /** Cast one full revolution at two body heights on the Minecraft client thread. */
-    public static JsonObject capture(Minecraft minecraft, int rayCount, double rangeMax) {
+    public static JsonObject capture(
+            Minecraft minecraft,
+            SimulationClock simulationClock,
+            int rayCount,
+            double rangeMax
+    ) {
         LocalPlayer player = minecraft.player;
         ClientLevel level = minecraft.level;
         if (player == null || level == null) {
@@ -33,6 +38,7 @@ public final class LidarScan {
         if (!Double.isFinite(rangeMax) || rangeMax < 1.0 || rangeMax > 64.0) {
             throw new IllegalArgumentException("lidar range_max must be from 1 through 64 metres");
         }
+        SimulationClock.SampleContext sample = simulationClock.capture(minecraft);
 
         double angleIncrement = Math.PI * 2.0 / rayCount;
         double yaw = Math.toRadians(player.getYRot());
@@ -67,6 +73,8 @@ public final class LidarScan {
         JsonObject scan = new JsonObject();
         scan.addProperty("schemaVersion", 1);
         scan.addProperty("type", "minecraft_collision_lidar");
+        scan.addProperty("tickId", sample.tickId());
+        scan.addProperty("simTimeNanos", sample.simTimeNanos());
         scan.addProperty("timestampMs", System.currentTimeMillis());
         scan.addProperty("angleMin", ANGLE_MIN);
         scan.addProperty("angleMax", ANGLE_MIN + (rayCount - 1) * angleIncrement);

@@ -14,13 +14,14 @@ public final class RobonixMinecraftMod {
 
     /** Registers render/tick callbacks and starts the loopback command server. */
     public RobonixMinecraftMod() {
-        FrameCapture frameCapture = new FrameCapture();
-        DepthCapture depthCapture = new DepthCapture();
+        SimulationClock simulationClock = new SimulationClock();
+        FrameCapture frameCapture = new FrameCapture(simulationClock);
+        DepthCapture depthCapture = new DepthCapture(simulationClock);
         MinecraftControl control = new MinecraftControl();
         MinecraftActions actions = new MinecraftActions(control);
         MinecraftChatBridge chatBridge = new MinecraftChatBridge();
         LocalCommandServer server = new LocalCommandServer(
-                frameCapture, depthCapture, control, actions, chatBridge);
+                simulationClock, frameCapture, depthCapture, control, actions, chatBridge);
 
         MinecraftForge.EVENT_BUS.addListener(frameCapture::onRenderGui);
         MinecraftForge.EVENT_BUS.addListener(frameCapture::onRenderScreen);
