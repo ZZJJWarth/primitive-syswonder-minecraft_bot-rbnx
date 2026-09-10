@@ -206,10 +206,17 @@ Pilot can also compose the Minecraft state and action capabilities directly:
   player to the nearest route segment. The support layer is never cleared;
   non-dirt blockers remain for a fresh navigation decision.
 - `robonix/primitive/minecraft/attack_entity` accepts a Scene-selected
-  `minecraft:zombie` object ID and resolves it to the live Entity UUID. The Mod
+  `minecraft:zombie`, or a player permitted by the configured combat mode,
+  `minecraft:player`, object ID and resolves it to the live Entity UUID. The Mod
   performs bounded pursuit, gradual aiming, cooldown-aware attacks, and death
   verification. It stops on low health, timeout, disappearance, or excessive
-  chase distance and never accepts players or other entity types.
+  chase distance. Player combat is disabled by default. Use
+  `RBNX_MINECRAFT_PLAYER_ATTACK_MODE=allowlist` with permitted UUIDs/names in
+  `RBNX_MINECRAFT_ATTACKABLE_PLAYERS`, or use mode `all` for every other visible
+  player. Set `RBNX_MINECRAFT_PLAYER_CHASE_MODE=until_death` to remove the normal
+  player-combat timeout, travel-distance, attack-attempt, and unsafe-drop limits.
+  Low health, death, target disappearance, disconnection, and policy changes
+  still stop combat. The local player and all other entity types remain rejected.
 - `robonix/primitive/minecraft/deposit_item` accepts a stable chest object ID
   and transfers an exact positive quantity of any registered item ID, reporting
   synchronized player and container counts. It fails before mutation when the
@@ -317,7 +324,17 @@ that process itself. Only one wrapper may use a display at a time. Set
   default `540`. Capture scaling preserves the client framebuffer aspect ratio.
 - `RBNX_MINECRAFT_JPEG_QUALITY`: JPEG quality from `0.1` to `1.0`, default `0.8`.
 - `RBNX_MINECRAFT_BLOCK_RADIUS`: structured block scan radius, default `5`.
-- `RBNX_MINECRAFT_ENTITY_RADIUS`: visible zombie scan radius, default `16`.
+- `RBNX_MINECRAFT_ENTITY_RADIUS`: visible attackable-entity scan radius, default
+  `16`.
+- `RBNX_MINECRAFT_PLAYER_ATTACK_MODE`: `disabled` (default), `allowlist`, or
+  `all`. `all` exposes and permits every other visible player.
+- `RBNX_MINECRAFT_ATTACKABLE_PLAYERS`: comma-separated player UUID/name
+  allowlist used in `allowlist` mode; an empty list permits no players.
+- `RBNX_MINECRAFT_PLAYER_CHASE_MODE`: `bounded` (default) retains normal combat
+  limits; `until_death` pursues a permitted player without timeout, origin
+  distance, target displacement, attack-attempt, or unsafe-drop limits.
+- `RBNX_MINECRAFT_ALLOW_PLAYER_ATTACK`: legacy compatibility switch. `true` or
+  `1` selects `allowlist` when `RBNX_MINECRAFT_PLAYER_ATTACK_MODE` is unset.
 - `RBNX_MINECRAFT_MOD_HOST`: provider connection host, default `127.0.0.1`.
 - `RBNX_MINECRAFT_MOD_TIMEOUT_SEC`: provider command timeout, default `35`;
   valid range `0.1` through `300`.

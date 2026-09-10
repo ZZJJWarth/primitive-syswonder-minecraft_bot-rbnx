@@ -16,6 +16,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.state.BlockState;
@@ -33,7 +34,8 @@ public final class ObservationFactory {
             "minecraft:cauldron",
             "minecraft:water_cauldron");
     private static final Set<String> SEMANTIC_ENTITY_WHITELIST = Set.of(
-            "minecraft:zombie");
+            "minecraft:zombie",
+            "minecraft:player");
     private static final Map<String, DiscoveredBlock> DISCOVERED_BLOCKS = new LinkedHashMap<>();
     private static ClientLevel discoveredLevel;
 
@@ -137,6 +139,9 @@ public final class ObservationFactory {
             String name = level.registryAccess().registryOrThrow(Registries.ENTITY_TYPE)
                     .getKey(entity.getType()).toString();
             if (!SEMANTIC_ENTITY_WHITELIST.contains(name) || !player.hasLineOfSight(entity)) {
+                continue;
+            }
+            if (entity instanceof Player targetPlayer && !PlayerCombatPolicy.permits(targetPlayer)) {
                 continue;
             }
             Vec3 center = entity.getBoundingBox().getCenter();

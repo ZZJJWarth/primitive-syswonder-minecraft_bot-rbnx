@@ -137,7 +137,8 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
   - Stop as soon as a route exists and clear no more than the provider's
     configured obstacle limit per recovery attempt.
 - `robonix/primitive/minecraft/attack_entity`
-  - Resolves one Scene-selected `minecraft:zombie` ID to its native Entity UUID
+  - Resolves one Scene-selected `minecraft:zombie`, or `minecraft:player`
+    permitted by disabled/allowlist/all combat mode, ID to its native Entity UUID
     and owns the local combat loop. It tracks the moving target, approaches
     within normal reach, waits for attack cooldown, uses the normal client
     attack interaction, and returns only after observing target death.

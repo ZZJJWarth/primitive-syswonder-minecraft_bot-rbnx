@@ -20,6 +20,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.ChestMenu;
@@ -64,8 +65,10 @@ public final class MinecraftActions implements AutoCloseable {
             ResourceLocation.fromNamespaceAndPath("minecraft", "crafting_table");
     private static final ResourceLocation ZOMBIE =
             ResourceLocation.fromNamespaceAndPath("minecraft", "zombie");
+    private static final ResourceLocation PLAYER =
+            ResourceLocation.fromNamespaceAndPath("minecraft", "player");
     private static final Set<ResourceLocation> BREAKABLE_BLOCKS = Set.of(DIRT, CRAFTING_TABLE);
-    private static final Set<ResourceLocation> ATTACKABLE_ENTITIES = Set.of(ZOMBIE);
+    private static final Set<ResourceLocation> ATTACKABLE_ENTITIES = Set.of(ZOMBIE, PLAYER);
     private final MinecraftControl control;
     private ActiveAction activeAction;
 
@@ -457,7 +460,7 @@ public final class MinecraftActions implements AutoCloseable {
         return result;
     }
 
-    /** Begins bounded pursuit and cooldown-aware attacks against one live zombie UUID. */
+    /** Begins cooldown-aware attacks against one live, UUID-bound entity. */
     public CompletableFuture<JsonObject> attackEntity(
             String entityUuid,
             String expectedEntity
@@ -473,7 +476,8 @@ public final class MinecraftActions implements AutoCloseable {
                 }
                 ResourceLocation expected = ResourceLocation.tryParse(expectedEntity);
                 if (expected == null || !ATTACKABLE_ENTITIES.contains(expected)) {
-                    throw new IllegalArgumentException("expected_entity must be minecraft:zombie");
+                    throw new IllegalArgumentException(
+                            "expected_entity must be minecraft:zombie or minecraft:player");
                 }
                 UUID uuid;
                 try {
@@ -485,6 +489,7 @@ public final class MinecraftActions implements AutoCloseable {
                 if (!(entity instanceof LivingEntity living) || !living.isAlive()) {
                     throw new IllegalStateException("target entity is unavailable or already dead");
                 }
+                requirePlayerCombatAllowed(player, entity);
                 String actual = entityName(minecraft, entity);
                 if (!actual.equals(expectedEntity)) {
                     throw new IllegalStateException(
@@ -498,6 +503,8 @@ public final class MinecraftActions implements AutoCloseable {
                 }
                 control.stopForAction();
                 long now = System.nanoTime();
+                boolean chaseUntilDeath = entity instanceof Player
+                        && PlayerCombatPolicy.chaseUntilDeath();
                 activeAction = new ActiveAttack(
                         player,
                         uuid,
@@ -509,8 +516,9 @@ public final class MinecraftActions implements AutoCloseable {
                         entity.getX(),
                         entity.getZ(),
                         minecraft.options.keyUp.isDown(),
+                        chaseUntilDeath,
                         now,
-                        now + ACTION_TIMEOUT_NANOS,
+                        chaseUntilDeath ? Long.MAX_VALUE : now + ACTION_TIMEOUT_NANOS,
                         result);
             } catch (Exception exception) {
                 result.completeExceptionally(exception);
@@ -928,6 +936,7 @@ public final class MinecraftActions implements AutoCloseable {
         if (!(entity instanceof LivingEntity living)) {
             throw new IllegalStateException("target entity disappeared before death was confirmed");
         }
+        requirePlayerCombatAllowed(player, entity);
         String actual = entityName(minecraft, entity);
         if (!actual.equals(action.expectedEntity())) {
             throw new IllegalStateException(
@@ -945,11 +954,13 @@ public final class MinecraftActions implements AutoCloseable {
             finishActive(response);
             return;
         }
-        if (horizontalDistance(player.getX(), player.getZ(), action.startX(), action.startZ())
+        if (!action.chaseUntilDeath()
+                && horizontalDistance(player.getX(), player.getZ(), action.startX(), action.startZ())
                 > MAX_COMBAT_TRAVEL_DISTANCE) {
             throw new IllegalStateException("entity combat exceeded maximum bot travel distance");
         }
-        if (horizontalDistance(entity.getX(), entity.getZ(), action.targetStartX(), action.targetStartZ())
+        if (!action.chaseUntilDeath()
+                && horizontalDistance(entity.getX(), entity.getZ(), action.targetStartX(), action.targetStartZ())
                 > MAX_TARGET_TRAVEL_DISTANCE) {
             throw new IllegalStateException("target entity exceeded maximum chase distance");
         }
@@ -962,7 +973,7 @@ public final class MinecraftActions implements AutoCloseable {
                 minecraft.options.keyUp.setDown(action.forwardWasDown());
                 return;
             }
-            if (!hasSafeCombatStep(minecraft, player, entity)) {
+            if (!action.chaseUntilDeath() && !hasSafeCombatStep(minecraft, player, entity)) {
                 throw new IllegalStateException("entity combat stopped before an unsafe drop");
             }
             minecraft.options.keyUp.setDown(true);
@@ -982,12 +993,23 @@ public final class MinecraftActions implements AutoCloseable {
                 || !action.attackIntervalElapsed(now)) {
             return;
         }
-        if (action.attacksAttempted() >= MAX_ATTACK_ATTEMPTS) {
+        if (!action.chaseUntilDeath() && action.attacksAttempted() >= MAX_ATTACK_ATTEMPTS) {
             throw new IllegalStateException("target survived the maximum 30 attack attempts");
         }
         minecraft.gameMode.attack(player, entity);
         player.swing(InteractionHand.MAIN_HAND);
         action.recordAttack(now);
+    }
+
+    /** Rejects player targets unless the local opt-in policy still permits them. */
+    private static void requirePlayerCombatAllowed(LocalPlayer localPlayer, Entity entity) {
+        if (entity == localPlayer) {
+            throw new IllegalStateException("the local player cannot be an attack target");
+        }
+        if (entity instanceof Player target && !PlayerCombatPolicy.permits(target)) {
+            throw new IllegalStateException(
+                    "player attack is disabled or target player is not allowlisted");
+        }
     }
 
     /** Applies bounded yaw and pitch correction toward a moving entity centre. */
@@ -2085,6 +2107,7 @@ public final class MinecraftActions implements AutoCloseable {
         private final double targetStartX;
         private final double targetStartZ;
         private final boolean forwardWasDown;
+        private final boolean chaseUntilDeath;
         private final long deadlineNanos;
         private final CompletableFuture<JsonObject> result;
         private long lastStepNanos;
@@ -2104,6 +2127,7 @@ public final class MinecraftActions implements AutoCloseable {
                 double targetStartX,
                 double targetStartZ,
                 boolean forwardWasDown,
+                boolean chaseUntilDeath,
                 long lastStepNanos,
                 long deadlineNanos,
                 CompletableFuture<JsonObject> result
@@ -2118,6 +2142,7 @@ public final class MinecraftActions implements AutoCloseable {
             this.targetStartX = targetStartX;
             this.targetStartZ = targetStartZ;
             this.forwardWasDown = forwardWasDown;
+            this.chaseUntilDeath = chaseUntilDeath;
             this.lastStepNanos = lastStepNanos;
             this.deadlineNanos = deadlineNanos;
             this.result = result;
@@ -2148,6 +2173,7 @@ public final class MinecraftActions implements AutoCloseable {
         double targetStartX() { return targetStartX; }
         double targetStartZ() { return targetStartZ; }
         boolean forwardWasDown() { return forwardWasDown; }
+        boolean chaseUntilDeath() { return chaseUntilDeath; }
         long lastStepNanos() { return lastStepNanos; }
         void setLastStepNanos(long value) { lastStepNanos = value; }
         int attacksAttempted() { return attacksAttempted; }

@@ -670,22 +670,64 @@ class MinecraftModClientTest(unittest.TestCase):
             "expected_entity": "minecraft:zombie",
         })
 
-    def test_attack_entity_rejects_unknown_and_non_zombie_targets(self) -> None:
+    def test_attack_entity_accepts_player_and_rejects_unknown_or_other_targets(self) -> None:
         """Reject stale identity and every non-whitelisted entity before mutation."""
         unknown = driver.minecraft_mcp.AttackEntity_Request(
             object_id="missing:entity",
             expected_entity="minecraft:zombie",
         )
         skeleton = driver.minecraft_mcp.AttackEntity_Request(
-            object_id=semantic_entity_target(label="minecraft:skeleton"),
+            object_id=semantic_entity_target(
+                entity_uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                label="minecraft:skeleton",
+            ),
             expected_entity="minecraft:skeleton",
         )
+        player_id = semantic_entity_target(label="minecraft:player")
+        player = driver.minecraft_mcp.AttackEntity_Request(
+            object_id=player_id,
+            expected_entity="minecraft:player",
+        )
+        player_result = {
+            "killed": True,
+            "actual_entity": "minecraft:player",
+            "attacks_attempted": 5,
+            "attacks_landed": 4,
+            "bot_health_before": 20.0,
+            "bot_health_after": 14.0,
+        }
+        with patch.object(driver.client, "request", return_value=player_result) as request:
+            response = driver.attack_entity_mcp(player)
+        self.assertTrue(response.killed)
+        self.assertEqual(response.actual_entity, "minecraft:player")
+        self.assertEqual(request.call_args.args[0]["expected_entity"], "minecraft:player")
         with patch.object(driver.client, "request") as request:
             with self.assertRaisesRegex(ValueError, "unknown or stale"):
                 driver.attack_entity_mcp(unknown)
-            with self.assertRaisesRegex(ValueError, "must be minecraft:zombie"):
+            with self.assertRaisesRegex(ValueError, "minecraft:zombie or minecraft:player"):
                 driver.attack_entity_mcp(skeleton)
         request.assert_not_called()
+
+    def test_player_until_death_chase_waits_without_response_timeout(self) -> None:
+        """Keep the provider socket open while the Mod pursues a permitted player."""
+        player = driver.minecraft_mcp.AttackEntity_Request(
+            object_id=semantic_entity_target(label="minecraft:player"),
+            expected_entity="minecraft:player",
+        )
+        result = {
+            "killed": True,
+            "actual_entity": "minecraft:player",
+            "attacks_attempted": 40,
+            "attacks_landed": 20,
+            "bot_health_before": 20.0,
+            "bot_health_after": 10.0,
+        }
+        with patch.dict(os.environ, {
+            "RBNX_MINECRAFT_PLAYER_CHASE_MODE": "until_death",
+        }), patch.object(driver, "action_request", return_value=result) as request:
+            response = driver.attack_entity_mcp(player)
+        self.assertTrue(response.killed)
+        self.assertTrue(request.call_args.kwargs["wait_until_response"])
 
     def test_deposit_item_requires_exact_requested_count_changes(self) -> None:
         """Forward any registry-shaped item ID and verify both requested deltas."""
@@ -1234,7 +1276,7 @@ class MinecraftModClientTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown or stale"):
             driver.native_entity_target(obj["id"], "minecraft:zombie")
 
-    def test_mod_combat_is_uuid_bound_bounded_and_zombie_only(self) -> None:
+    def test_mod_combat_is_uuid_bound_bounded_and_policy_guarded(self) -> None:
         """Keep combat policy in the Minecraft Mod rather than Scene."""
         root = Path(__file__).resolve().parents[1]
         actions = (
@@ -1252,9 +1294,30 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertIn("living.hurtTime > 0", actions)
         self.assertIn("!action.attackIntervalElapsed(now)", actions)
         self.assertIn("minecraft.gameMode.attack(player, entity)", actions)
-        self.assertIn("ATTACKABLE_ENTITIES = Set.of(ZOMBIE)", actions)
+        self.assertIn("ATTACKABLE_ENTITIES = Set.of(ZOMBIE, PLAYER)", actions)
+        self.assertIn("PlayerCombatPolicy.permits(target)", actions)
+        self.assertIn("chaseUntilDeath ? Long.MAX_VALUE", actions)
+        self.assertIn("!action.chaseUntilDeath()", actions)
+        self.assertIn(
+            "!action.chaseUntilDeath() && !hasSafeCombatStep", actions,
+        )
         self.assertIn("SEMANTIC_ENTITY_WHITELIST = Set.of", observation)
         self.assertIn('"minecraft:zombie"', observation)
+        self.assertIn('"minecraft:player"', observation)
+        self.assertIn("PlayerCombatPolicy.permits(targetPlayer)", observation)
+        policy = (
+            root / "src/main/java/com/robonix/minecraftmod/PlayerCombatPolicy.java"
+        ).read_text(encoding="utf-8")
+        self.assertIn('MODE_ENV = "RBNX_MINECRAFT_PLAYER_ATTACK_MODE"', policy)
+        self.assertIn('CHASE_MODE_ENV = "RBNX_MINECRAFT_PLAYER_CHASE_MODE"', policy)
+        self.assertIn('equalsIgnoreCase("until_death")', policy)
+        self.assertIn('mode.equals("all")', policy)
+        self.assertIn('mode.equals("allowlist")', policy)
+        self.assertIn('Set.of("disabled", "allowlist", "all")', policy)
+        self.assertIn('getOrDefault(ENABLED_ENV, "false")', policy)
+        self.assertIn('getOrDefault(ALLOWLIST_ENV, "")', policy)
+        self.assertIn("allowed.contains(target.getUUID().toString()", policy)
+        self.assertIn("allowed.contains(target.getGameProfile().getName()", policy)
 
     def test_semantic_whitelist_distinguishes_empty_and_water_cauldrons(self) -> None:
         """Keep both cauldron block-state registry names visible to Scene."""

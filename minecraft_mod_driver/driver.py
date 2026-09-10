@@ -139,7 +139,13 @@ class MinecraftModClient:
         self.id_lock = threading.Lock()
         self.next_id = 1
 
-    def request(self, payload: dict[str, Any], timeout_sec: float | None = None) -> dict[str, Any]:
+    def request(
+        self,
+        payload: dict[str, Any],
+        timeout_sec: float | None = None,
+        *,
+        wait_until_response: bool = False,
+    ) -> dict[str, Any]:
         """Send one JSON-lines request over a short-lived loopback connection."""
         timeout = self.timeout if timeout_sec is None else timeout_sec
         if not math.isfinite(timeout) or not 0.1 <= timeout <= 300.0:
@@ -149,7 +155,7 @@ class MinecraftModClient:
             self.next_id += 1
         request = {"id": request_id, **payload}
         with socket.create_connection((self.host, self.port), timeout=timeout) as connection:
-            connection.settimeout(timeout)
+            connection.settimeout(None if wait_until_response else timeout)
             connection.sendall(json.dumps(request).encode("utf-8") + b"\n")
             response = self._read_response(connection)
         if str(response.get("id")) != request_id:
@@ -1059,9 +1065,16 @@ def registry_name(value: Any, name: str) -> str:
     return value
 
 
-def action_request(payload: dict[str, Any]) -> dict[str, Any]:
+def action_request(
+    payload: dict[str, Any], *, wait_until_response: bool = False,
+) -> dict[str, Any]:
     """Send an item action with a socket deadline longer than its Mod deadline."""
-    return client.request(payload, timeout_sec=max(client.timeout, ACTION_REQUEST_TIMEOUT_SEC))
+    timeout = max(client.timeout, ACTION_REQUEST_TIMEOUT_SEC)
+    if wait_until_response:
+        return client.request(
+            payload, timeout_sec=timeout, wait_until_response=True,
+        )
+    return client.request(payload, timeout_sec=timeout)
 
 
 @minecraft_actions.mcp("robonix/primitive/minecraft/inventory")
@@ -1497,21 +1510,29 @@ def break_block_mcp(
 def attack_entity_mcp(
     req: minecraft_mcp.AttackEntity_Request,
 ) -> minecraft_mcp.AttackEntity_Response:
-    """Kill one Scene-selected zombie through a bounded native combat loop.
+    """Kill one permitted Scene-selected entity through a bounded native combat loop.
 
     MUST call ``scene_list_objects`` first and copy the selected
-    ``minecraft:zombie`` object's stable ``id`` unchanged into ``object_id``.
+    ``minecraft:zombie`` or opted-in ``minecraft:player`` object's stable ``id``
+    unchanged into ``object_id``.
     The primitive resolves that identity to a live Entity UUID; Scene
     coordinates, camera estimates, and navigation poses are never targets.
     """
     entity_uuid, expected = native_entity_target(req.object_id, req.expected_entity)
-    if expected != "minecraft:zombie":
-        raise ValueError("expected_entity must be minecraft:zombie")
+    if expected not in {"minecraft:zombie", "minecraft:player"}:
+        raise ValueError(
+            "expected_entity must be minecraft:zombie or minecraft:player"
+        )
+    until_death = (
+        expected == "minecraft:player"
+        and os.environ.get("RBNX_MINECRAFT_PLAYER_CHASE_MODE", "bounded")
+        .strip().casefold() == "until_death"
+    )
     result = action_request({
         "cmd": "attack_entity",
         "entity_uuid": entity_uuid,
         "expected_entity": expected,
-    })
+    }, wait_until_response=until_death)
     killed = result.get("killed")
     actual = registry_name(result.get("actual_entity"), "actual_entity")
     attacks_attempted = exact_int(
