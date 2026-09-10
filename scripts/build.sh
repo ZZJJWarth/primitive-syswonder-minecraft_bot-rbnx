@@ -20,9 +20,9 @@ if [ ! -x "$VENV/bin/python3" ]; then
   echo "[minecraft-mod/build] create codegen venv"
   python3 -m venv "$VENV"
 fi
-if ! "$VENV/bin/python3" -c 'import grpc_tools.protoc, mcp, fastmcp, yaml, numpy, PIL' 2>/dev/null; then
+if ! "$VENV/bin/python3" -c 'import grpc_tools.protoc, yaml, numpy, PIL; from mcp.server.fastmcp import FastMCP' 2>/dev/null; then
   echo "[minecraft-mod/build] install Python runtime/codegen deps"
-  "$VENV/bin/python3" -m pip install grpcio-tools "mcp>=1.0" "fastmcp>=3" \
+  "$VENV/bin/python3" -m pip install grpcio-tools "mcp>=1.28.1,<2" \
     "pyyaml>=6" "numpy>=1.26" "pillow>=10"
 fi
 export PATH="$VENV/bin:$PATH"

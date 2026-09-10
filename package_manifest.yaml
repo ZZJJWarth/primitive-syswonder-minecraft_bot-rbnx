@@ -19,7 +19,6 @@ capabilities:
   - name: robonix/primitive/camera/depth
   - name: robonix/primitive/camera/extrinsics
   - name: robonix/primitive/camera/intrinsics
-  - name: robonix/primitive/camera/driver
   - name: robonix/primitive/lidar/lidar
   - name: robonix/primitive/chassis/move
   - name: robonix/primitive/chassis/odom

@@ -33,9 +33,9 @@ from std_msgs_mcp import Empty  # noqa: E402
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 # One deploy manifest entry is one Atlas provider and one lifecycle owner.
-# Keep the camera driver as this aggregate primitive's package-level lifecycle
-# contract while declaring the colocated chassis, lidar, perception, and
-# Minecraft contracts on the same provider.
+# The shared runtime Driver owns this aggregate primitive's package lifecycle
+# while colocated chassis, lidar, perception, and Minecraft contracts are
+# declared on the same provider.
 minecraft_mod = Primitive(id="minecraft_mod", namespace="robonix/primitive/camera")
 minecraft_camera = minecraft_mod
 minecraft_chassis = minecraft_mod
@@ -473,7 +473,12 @@ def observation_timestamp(observation: dict[str, Any]) -> float:
         if isinstance(raw_sim, bool) or not isinstance(raw_sim, int) or raw_sim < 0:
             raise ValueError("Minecraft observation simTimeNanos is invalid")
         return raw_sim / 1_000_000_000.0
-    raw = str(observation.get("timestamp") or "")
+    return wall_timestamp(observation.get("timestamp"))
+
+
+def wall_timestamp(raw_value: Any) -> float:
+    """Parse an ISO-8601 wall-clock field independently of ROS simulation time."""
+    raw = str(raw_value or "")
     try:
         captured = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -496,7 +501,7 @@ def semantic_objects_payload(observation: dict[str, Any]) -> dict[str, Any]:
         minecraft_x = float(position["x"])
         minecraft_y = float(position["y"])
         minecraft_z = float(position["z"])
-        last_seen = observation_timestamp({"timestamp": block["lastSeen"]})
+        last_seen = wall_timestamp(block["lastSeen"])
         values = (minecraft_x, minecraft_y, minecraft_z, last_seen)
         if not all(math.isfinite(value) for value in values):
             raise ValueError("Minecraft semantic block coordinates must be finite")
@@ -530,7 +535,7 @@ def semantic_objects_payload(observation: dict[str, Any]) -> dict[str, Any]:
         width = float(entity["width"])
         height = float(entity["height"])
         depth = float(entity["depth"])
-        last_seen = observation_timestamp({"timestamp": entity["lastSeen"]})
+        last_seen = wall_timestamp(entity["lastSeen"])
         values = (
             minecraft_x, minecraft_y, minecraft_z, north_zero_yaw,
             width, height, depth, last_seen,

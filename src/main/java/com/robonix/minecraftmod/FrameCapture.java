@@ -5,7 +5,9 @@ import com.mojang.blaze3d.platform.NativeImage;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.Iterator;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -23,8 +25,10 @@ import net.minecraftforge.client.event.ScreenEvent;
 
 /** Captures the final client framebuffer and retains the latest JPEG frame. */
 public final class FrameCapture implements AutoCloseable {
+    private static final int HISTORY_SIZE = 8;
     private final SimulationClock simulationClock;
     private final AtomicReference<Frame> latest = new AtomicReference<>();
+    private final ArrayDeque<Frame> history = new ArrayDeque<>(HISTORY_SIZE);
     private final AtomicBoolean encoding = new AtomicBoolean(false);
     private final ExecutorService encoder = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "robonix-frame-encoder");
@@ -88,6 +92,13 @@ public final class FrameCapture implements AutoCloseable {
         return frame;
     }
 
+    /** Returns recent fresh frames so RGB-D can select a common simulation tick. */
+    public synchronized List<Frame> recent() {
+        long oldest = System.nanoTime() - TimeUnit.MILLISECONDS.toNanos(
+                Math.max(5000L, TimeUnit.NANOSECONDS.toMillis(intervalNanos) * 3L));
+        return history.stream().filter(frame -> frame.capturedWallNanos() >= oldest).toList();
+    }
+
     /** Converts one owned native image to a scaled JPEG and releases native memory. */
     private void encode(
             NativeImage image,
@@ -98,8 +109,15 @@ public final class FrameCapture implements AutoCloseable {
         try (image) {
             BufferedImage buffered = scale(image, outputWidth, outputHeight);
             byte[] data = writeJpeg(buffered, jpegQuality);
-            latest.set(new Frame(data, buffered.getWidth(), buffered.getHeight(),
-                    sample.tickId(), sample.simTimeNanos(), capturedWallMillis, capturedWallNanos));
+            Frame frame = new Frame(data, buffered.getWidth(), buffered.getHeight(),
+                    sample.tickId(), sample.simTimeNanos(), capturedWallMillis, capturedWallNanos);
+            latest.set(frame);
+            synchronized (this) {
+                history.addLast(frame);
+                while (history.size() > HISTORY_SIZE) {
+                    history.removeFirst();
+                }
+            }
         } catch (Exception exception) {
             RobonixMinecraftMod.LOGGER.error("Failed to encode Minecraft frame", exception);
         } finally {

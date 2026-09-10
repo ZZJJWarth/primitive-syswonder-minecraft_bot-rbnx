@@ -74,8 +74,8 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertIs(driver.minecraft_lidar, driver.minecraft_mod)
         self.assertIs(driver.minecraft_actions, driver.minecraft_mod)
 
-    def test_aggregate_provider_has_one_lifecycle_contract(self) -> None:
-        """Keep camera/driver as the package's sole lifecycle entry point."""
+    def test_aggregate_provider_uses_implicit_shared_lifecycle_contract(self) -> None:
+        """Keep callbacks on one provider and let the runtime select shared Driver."""
         provider = driver.minecraft_mod
         self.assertIs(provider._on_init, driver.init_camera)
         self.assertIs(provider._on_activate, driver.activate_camera)
@@ -89,10 +89,7 @@ class MinecraftModClientTest(unittest.TestCase):
             for capability in manifest["capabilities"]
             if capability["name"].endswith("/driver")
         ]
-        self.assertEqual(
-            lifecycle_contracts,
-            ["robonix/primitive/camera/driver"],
-        )
+        self.assertEqual(lifecycle_contracts, [])
 
     def test_legacy_deposit_prompt_forbids_scene_coordinate_conversion(self) -> None:
         """Keep the compatibility contract native and direct Scene callers to v2."""
@@ -1222,6 +1219,22 @@ class MinecraftModClientTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "simTimeNanos"):
                 observation_timestamp({"timestamp": "2023-11-14T22:13:20Z"})
+
+    def test_sim_objects_keep_wall_clock_last_seen(self) -> None:
+        """Object age remains Unix time while the message header uses simulation time."""
+        observation = {
+            "simTimeNanos": 12_350_000_000,
+            "semanticBlocks": [{
+                "id": "minecraft:overworld@4,64,3",
+                "name": "minecraft:crafting_table",
+                "position": {"x": 4, "y": 64, "z": 3},
+                "lastSeen": "2023-11-14T22:13:19.000Z",
+            }],
+        }
+        with patch.object(driver, "use_sim_time", True):
+            payload = semantic_objects_payload(observation)
+        self.assertEqual(payload["timestamp"], 12.35)
+        self.assertEqual(payload["objects"][0]["last_seen_unix"], 1_699_999_999.0)
 
     def test_clock_sample_preserves_nanoseconds_and_rejects_regression(self) -> None:
         """Publish exact /clock fields without permitting time to move backwards."""

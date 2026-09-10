@@ -5,6 +5,8 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.ArrayDeque;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -18,10 +20,12 @@ import org.lwjgl.system.MemoryUtil;
 
 /** Captures and linearizes the rendered world depth buffer. */
 public final class DepthCapture implements AutoCloseable {
+    private static final int HISTORY_SIZE = 8;
     private static final float NEAR_PLANE = 0.05F;
     private static final int MAX_CAPTURE_PIXELS = 3840 * 2160;
     private final SimulationClock simulationClock;
     private final AtomicReference<Frame> latest = new AtomicReference<>();
+    private final ArrayDeque<Frame> history = new ArrayDeque<>(HISTORY_SIZE);
     private final AtomicBoolean processing = new AtomicBoolean(false);
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private final ExecutorService converter = Executors.newSingleThreadExecutor(runnable -> {
@@ -61,6 +65,13 @@ public final class DepthCapture implements AutoCloseable {
             return null;
         }
         return frame;
+    }
+
+    /** Returns recent fresh frames so RGB-D can select a common simulation tick. */
+    public synchronized List<Frame> recent() {
+        long oldest = System.nanoTime() - TimeUnit.MILLISECONDS.toNanos(
+                Math.max(5000L, TimeUnit.NANOSECONDS.toMillis(intervalNanos) * 3L));
+        return history.stream().filter(frame -> frame.capturedWallNanos() >= oldest).toList();
     }
 
     /** Copies GPU depth on the render thread and schedules CPU linearization. */
@@ -154,9 +165,16 @@ public final class DepthCapture implements AutoCloseable {
                 }
             }
             if (!closed.get() && !Thread.currentThread().isInterrupted()) {
-                latest.set(new Frame(output.array(), width, height,
+                Frame frame = new Frame(output.array(), width, height,
                         sample.tickId(), sample.simTimeNanos(),
-                        capturedWallMillis, capturedWallNanos));
+                        capturedWallMillis, capturedWallNanos);
+                latest.set(frame);
+                synchronized (this) {
+                    history.addLast(frame);
+                    while (history.size() > HISTORY_SIZE) {
+                        history.removeFirst();
+                    }
+                }
             }
         } catch (RuntimeException | OutOfMemoryError exception) {
             RobonixMinecraftMod.LOGGER.error("Failed to convert Minecraft depth buffer", exception);

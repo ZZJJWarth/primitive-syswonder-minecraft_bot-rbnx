@@ -316,17 +316,62 @@ public final class LocalCommandServer implements AutoCloseable {
 
     /** Return only a capture-time-matched RGB/depth pair. */
     private JsonObject rgbdSnapshot() {
-        JsonObject rgb = snapshot();
-        JsonObject depth = depthSnapshot();
-        JsonObject rendered = rgb.getAsJsonObject("renderedView");
-        JsonObject depthView = depth.getAsJsonObject("depthView");
-        if (rendered.get("tickId").getAsLong() != depthView.get("tickId").getAsLong()) {
+        FrameCapture.Frame rgbFrame = null;
+        DepthCapture.Frame depthFrame = null;
+        for (FrameCapture.Frame candidateRgb : frameCapture.recent()) {
+            for (DepthCapture.Frame candidateDepth : depthCapture.recent()) {
+                if (candidateRgb.tickId() == candidateDepth.tickId()
+                        && (rgbFrame == null || candidateRgb.tickId() > rgbFrame.tickId())) {
+                    rgbFrame = candidateRgb;
+                    depthFrame = candidateDepth;
+                }
+            }
+        }
+        if (rgbFrame == null || depthFrame == null) {
             throw new IllegalStateException("latest RGB and depth frames are from different simulation ticks");
         }
+        JsonObject rendered = renderedView(rgbFrame);
+        JsonObject depthView = depthView(depthFrame);
         JsonObject result = new JsonObject();
         result.add("renderedView", rendered);
         result.add("depthView", depthView);
         return result;
+    }
+
+    private static JsonObject renderedView(FrameCapture.Frame frame) {
+        JsonObject image = new JsonObject();
+        image.addProperty("mimeType", "image/jpeg");
+        image.addProperty("dataUrl", "data:image/jpeg;base64,"
+                + Base64.getEncoder().encodeToString(frame.data()));
+        JsonObject view = new JsonObject();
+        view.addProperty("schemaVersion", 1);
+        view.addProperty("type", "first_person_rendered");
+        view.addProperty("width", frame.width());
+        view.addProperty("height", frame.height());
+        view.addProperty("tickId", frame.tickId());
+        view.addProperty("simTimeNanos", frame.simTimeNanos());
+        view.addProperty("timestampMs", frame.timestampMs());
+        view.add("image", image);
+        return view;
+    }
+
+    private static JsonObject depthView(DepthCapture.Frame frame) {
+        JsonObject image = new JsonObject();
+        image.addProperty("encoding", "32FC1");
+        image.addProperty("dataUrl", "data:application/octet-stream;base64,"
+                + Base64.getEncoder().encodeToString(frame.data()));
+        JsonObject view = new JsonObject();
+        view.addProperty("schemaVersion", 1);
+        view.addProperty("type", "first_person_depth");
+        view.addProperty("width", frame.width());
+        view.addProperty("height", frame.height());
+        view.addProperty("tickId", frame.tickId());
+        view.addProperty("simTimeNanos", frame.simTimeNanos());
+        view.addProperty("timestampMs", frame.timestampMs());
+        view.addProperty("verticalFovDeg", Minecraft.getInstance().options.fov().get());
+        view.addProperty("unit", "metre");
+        view.add("image", image);
+        return view;
     }
 
     /** Reads a required string property from an incoming request. */
