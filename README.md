@@ -136,9 +136,10 @@ Depth and odometry headers retain their client-side capture timestamps so map
 services can associate each frame with the corresponding player pose. In
 simulation-time mode, rendered sensors use the Minecraft tick plus the render
 partial-tick fraction instead of quantizing every capture to the 50 ms world
-tick. RGB and depth are selected only when their complete sub-tick capture
-timestamps match. The collision LiDAR uses the same continuous clock and
-interpolates player position and yaw to its own sampling fraction.
+tick. RGB and depth from one render cycle share a `renderFrameId` and one
+canonical sub-tick capture identity, then asynchronous encoders are paired by
+that integer ID. The collision LiDAR uses the same continuous clock and
+interpolates player position and yaw to its own independent sampling fraction.
 The odometry frame uses ROS ENU
 coordinates (`x` east, `y` north), treats one block as one metre, and places
 `minecraft_view_base` at the configurable nominal eye height. This navigation

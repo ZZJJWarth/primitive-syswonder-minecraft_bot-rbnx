@@ -27,6 +27,7 @@ import net.minecraftforge.client.event.ScreenEvent;
 public final class FrameCapture implements AutoCloseable {
     private static final int HISTORY_SIZE = 8;
     private final SimulationClock simulationClock;
+    private final RgbdFrameCoordinator rgbdCoordinator;
     private final AtomicReference<Frame> latest = new AtomicReference<>();
     private final ArrayDeque<Frame> history = new ArrayDeque<>(HISTORY_SIZE);
     private final AtomicBoolean encoding = new AtomicBoolean(false);
@@ -42,38 +43,49 @@ public final class FrameCapture implements AutoCloseable {
     private final float jpegQuality = envFloat("RBNX_MINECRAFT_JPEG_QUALITY", 0.8F);
     private long lastCaptureNanos;
 
-    public FrameCapture(SimulationClock simulationClock) {
+    public FrameCapture(
+            SimulationClock simulationClock,
+            RgbdFrameCoordinator rgbdCoordinator
+    ) {
         this.simulationClock = simulationClock;
+        this.rgbdCoordinator = rgbdCoordinator;
     }
 
     /** Reads a frame on the render thread at a bounded rate and encodes it asynchronously. */
     public void onRenderGui(RenderGuiEvent.Post event) {
         if (Minecraft.getInstance().screen == null) {
-            capture();
+            RgbdFrameCoordinator.FrameToken token = rgbdCoordinator.claimForRgb();
+            if (token != null) {
+                capture(token);
+            }
         }
     }
 
     /** Captures after an open inventory, menu, or other screen has rendered. */
     public void onRenderScreen(ScreenEvent.Render.Post event) {
-        capture();
+        capture(rgbdCoordinator.claimForRgb());
     }
 
     /** Takes one owned native image when rate and encoder capacity permit. */
-    private void capture() {
+    private void capture(RgbdFrameCoordinator.FrameToken token) {
         long now = System.nanoTime();
-        if (now - lastCaptureNanos < intervalNanos || !encoding.compareAndSet(false, true)) {
+        if ((token == null && now - lastCaptureNanos < intervalNanos)
+                || !encoding.compareAndSet(false, true)) {
             return;
         }
         lastCaptureNanos = now;
         NativeImage image = null;
         try {
             Minecraft minecraft = Minecraft.getInstance();
-            SimulationClock.SampleContext sample = simulationClock.capture(
-                    minecraft, minecraft.getPartialTick());
+            SimulationClock.SampleContext sample = token == null
+                    ? simulationClock.capture(minecraft, minecraft.getPartialTick())
+                    : token.sample();
+            long renderFrameId = token == null ? 0L : token.renderFrameId();
             long capturedWallMillis = System.currentTimeMillis();
             image = Screenshot.takeScreenshot(minecraft.getMainRenderTarget());
             NativeImage ownedImage = image;
-            encoder.execute(() -> encode(ownedImage, sample, capturedWallMillis, now));
+            encoder.execute(() -> encode(
+                    ownedImage, renderFrameId, sample, capturedWallMillis, now));
         } catch (RuntimeException exception) {
             if (image != null) {
                 image.close();
@@ -104,6 +116,7 @@ public final class FrameCapture implements AutoCloseable {
     /** Converts one owned native image to a scaled JPEG and releases native memory. */
     private void encode(
             NativeImage image,
+            long renderFrameId,
             SimulationClock.SampleContext sample,
             long capturedWallMillis,
             long capturedWallNanos
@@ -112,6 +125,7 @@ public final class FrameCapture implements AutoCloseable {
             BufferedImage buffered = scale(image, outputWidth, outputHeight);
             byte[] data = writeJpeg(buffered, jpegQuality);
             Frame frame = new Frame(data, buffered.getWidth(), buffered.getHeight(),
+                    renderFrameId,
                     sample.tickId(), sample.partialTick(), sample.simTimeNanos(),
                     sample.captureSequence(), capturedWallMillis, capturedWallNanos);
             latest.set(frame);
@@ -207,6 +221,7 @@ public final class FrameCapture implements AutoCloseable {
             byte[] data,
             int width,
             int height,
+            long renderFrameId,
             long tickId,
             float partialTick,
             long simTimeNanos,

@@ -279,6 +279,7 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("type", "first_person_rendered");
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
+        view.addProperty("renderFrameId", frame.renderFrameId());
         view.addProperty("tickId", frame.tickId());
         view.addProperty("partialTick", frame.partialTick());
         view.addProperty("simTimeNanos", frame.simTimeNanos());
@@ -305,6 +306,7 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("type", "first_person_depth");
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
+        view.addProperty("renderFrameId", frame.renderFrameId());
         view.addProperty("tickId", frame.tickId());
         view.addProperty("partialTick", frame.partialTick());
         view.addProperty("simTimeNanos", frame.simTimeNanos());
@@ -324,9 +326,10 @@ public final class LocalCommandServer implements AutoCloseable {
         DepthCapture.Frame depthFrame = null;
         for (FrameCapture.Frame candidateRgb : frameCapture.recent()) {
             for (DepthCapture.Frame candidateDepth : depthCapture.recent()) {
-                if (candidateRgb.simTimeNanos() == candidateDepth.simTimeNanos()
+                if (candidateRgb.renderFrameId() != 0L
+                        && candidateRgb.renderFrameId() == candidateDepth.renderFrameId()
                         && (rgbFrame == null
-                        || candidateRgb.simTimeNanos() > rgbFrame.simTimeNanos())) {
+                        || candidateRgb.renderFrameId() > rgbFrame.renderFrameId())) {
                     rgbFrame = candidateRgb;
                     depthFrame = candidateDepth;
                 }
@@ -334,7 +337,7 @@ public final class LocalCommandServer implements AutoCloseable {
         }
         if (rgbFrame == null || depthFrame == null) {
             throw new IllegalStateException(
-                    "latest RGB and depth frames have different simulation capture times");
+                    "latest RGB and depth frames do not share a render frame");
         }
         JsonObject rendered = renderedView(rgbFrame);
         JsonObject depthView = depthView(depthFrame);
@@ -354,6 +357,7 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("type", "first_person_rendered");
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
+        view.addProperty("renderFrameId", frame.renderFrameId());
         view.addProperty("tickId", frame.tickId());
         view.addProperty("partialTick", frame.partialTick());
         view.addProperty("simTimeNanos", frame.simTimeNanos());
@@ -373,6 +377,7 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("type", "first_person_depth");
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
+        view.addProperty("renderFrameId", frame.renderFrameId());
         view.addProperty("tickId", frame.tickId());
         view.addProperty("partialTick", frame.partialTick());
         view.addProperty("simTimeNanos", frame.simTimeNanos());

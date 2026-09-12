@@ -15,8 +15,9 @@ public final class RobonixMinecraftMod {
     /** Registers render/tick callbacks and starts the loopback command server. */
     public RobonixMinecraftMod() {
         SimulationClock simulationClock = new SimulationClock();
-        FrameCapture frameCapture = new FrameCapture(simulationClock);
-        DepthCapture depthCapture = new DepthCapture(simulationClock);
+        RgbdFrameCoordinator rgbdCoordinator = new RgbdFrameCoordinator(simulationClock);
+        FrameCapture frameCapture = new FrameCapture(simulationClock, rgbdCoordinator);
+        DepthCapture depthCapture = new DepthCapture(rgbdCoordinator);
         MinecraftControl control = new MinecraftControl();
         MinecraftActions actions = new MinecraftActions(control);
         MinecraftChatBridge chatBridge = new MinecraftChatBridge();

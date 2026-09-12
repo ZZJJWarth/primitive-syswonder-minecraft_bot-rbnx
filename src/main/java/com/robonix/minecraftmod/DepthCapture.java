@@ -23,7 +23,7 @@ public final class DepthCapture implements AutoCloseable {
     private static final int HISTORY_SIZE = 8;
     private static final float NEAR_PLANE = 0.05F;
     private static final int MAX_CAPTURE_PIXELS = 3840 * 2160;
-    private final SimulationClock simulationClock;
+    private final RgbdFrameCoordinator rgbdCoordinator;
     private final AtomicReference<Frame> latest = new AtomicReference<>();
     private final ArrayDeque<Frame> history = new ArrayDeque<>(HISTORY_SIZE);
     private final AtomicBoolean processing = new AtomicBoolean(false);
@@ -39,8 +39,8 @@ public final class DepthCapture implements AutoCloseable {
     private final int outputHeight = Math.min(envInt("RBNX_MINECRAFT_CAPTURE_HEIGHT", 540), 2160);
     private long lastCaptureNanos;
 
-    public DepthCapture(SimulationClock simulationClock) {
-        this.simulationClock = simulationClock;
+    public DepthCapture(RgbdFrameCoordinator rgbdCoordinator) {
+        this.rgbdCoordinator = rgbdCoordinator;
     }
 
     /** Reads world depth after level rendering and before GUI overlays. */
@@ -48,12 +48,15 @@ public final class DepthCapture implements AutoCloseable {
         if (closed.get() || event.getStage() != RenderLevelStageEvent.Stage.AFTER_LEVEL) {
             return;
         }
+        rgbdCoordinator.beginRenderFrame();
         long now = System.nanoTime();
         if (now - lastCaptureNanos < intervalNanos || !processing.compareAndSet(false, true)) {
             return;
         }
         lastCaptureNanos = now;
-        readDepthBuffer(event.getPartialTick());
+        RgbdFrameCoordinator.FrameToken token = rgbdCoordinator.startCapture(
+                Minecraft.getInstance(), event.getPartialTick());
+        readDepthBuffer(token);
     }
 
     /** Returns a recent depth frame or null when capture is unavailable or stale. */
@@ -75,9 +78,9 @@ public final class DepthCapture implements AutoCloseable {
     }
 
     /** Copies GPU depth on the render thread and schedules CPU linearization. */
-    private void readDepthBuffer(float partialTick) {
+    private void readDepthBuffer(RgbdFrameCoordinator.FrameToken token) {
         Minecraft minecraft = Minecraft.getInstance();
-        SimulationClock.SampleContext sample = simulationClock.capture(minecraft, partialTick);
+        SimulationClock.SampleContext sample = token.sample();
         long capturedWallMillis = System.currentTimeMillis();
         long capturedWallNanos = System.nanoTime();
         RenderTarget target = minecraft.getMainRenderTarget();
@@ -107,7 +110,7 @@ public final class DepthCapture implements AutoCloseable {
             buffer.get(depth);
             float farPlane = minecraft.gameRenderer.getDepthFar();
             converter.execute(() -> convert(
-                    depth, width, height, farPlane, sample,
+                    depth, width, height, farPlane, token.renderFrameId(), sample,
                     capturedWallMillis, capturedWallNanos));
         } catch (RuntimeException | OutOfMemoryError exception) {
             processing.set(false);
@@ -143,6 +146,7 @@ public final class DepthCapture implements AutoCloseable {
             int sourceWidth,
             int sourceHeight,
             float farPlane,
+            long renderFrameId,
             SimulationClock.SampleContext sample,
             long capturedWallMillis,
             long capturedWallNanos
@@ -166,6 +170,7 @@ public final class DepthCapture implements AutoCloseable {
             }
             if (!closed.get() && !Thread.currentThread().isInterrupted()) {
                 Frame frame = new Frame(output.array(), width, height,
+                        renderFrameId,
                         sample.tickId(), sample.partialTick(), sample.simTimeNanos(),
                         sample.captureSequence(),
                         capturedWallMillis, capturedWallNanos);
@@ -225,6 +230,7 @@ public final class DepthCapture implements AutoCloseable {
             byte[] data,
             int width,
             int height,
+            long renderFrameId,
             long tickId,
             float partialTick,
             long simTimeNanos,
