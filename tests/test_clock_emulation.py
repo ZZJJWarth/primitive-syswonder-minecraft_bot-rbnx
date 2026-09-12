@@ -82,6 +82,65 @@ class ClockEmulatorTest(unittest.TestCase):
         second = ClockEmulator.from_config(config).lidar_ptp_sample(1_000_000_000, 9)
         self.assertEqual(first, second)
 
+    def test_corrupted_primary_timestamps_use_common_domain_offsets(self) -> None:
+        emulator = ClockEmulator.from_config({
+            "clock_emulation": {
+                "enabled": True,
+                "mapping_test": {
+                    "primary_timestamp_mode": "corrupted",
+                    "camera_offset_ms": 100,
+                    "lidar_offset_ms": -25,
+                },
+            },
+        })
+        camera = emulator.primary_sample("camera", 2_000_000_000, 7)
+        lidar = emulator.primary_sample("lidar", 2_000_000_000, 8)
+        self.assertTrue(emulator.corrupt_primary_timestamps)
+        self.assertEqual(camera.device_timestamp_ns, 2_100_000_000)
+        self.assertEqual(camera.injected_offset_ns, 100_000_000)
+        self.assertEqual(camera.state, "CORRUPTED")
+        self.assertEqual(lidar.device_timestamp_ns, 1_975_000_000)
+        self.assertEqual(lidar.injected_offset_ns, -25_000_000)
+
+    def test_truth_primary_mode_ignores_configured_offsets(self) -> None:
+        emulator = ClockEmulator.from_config({
+            "clock_emulation": {
+                "mapping_test": {"camera_offset_ms": 100},
+            },
+        })
+        sample = emulator.primary_sample("camera", 2_000_000_000, 7)
+        self.assertFalse(emulator.corrupt_primary_timestamps)
+        self.assertEqual(sample.device_timestamp_ns, 2_000_000_000)
+        self.assertEqual(sample.injected_offset_ns, 0)
+        self.assertEqual(sample.state, "TRUTH")
+
+    def test_invalid_primary_timestamp_configuration_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "require clock_emulation.enabled"):
+            ClockEmulator.from_config({
+                "clock_emulation": {
+                    "mapping_test": {"primary_timestamp_mode": "corrupted"},
+                },
+            })
+        with self.assertRaisesRegex(ValueError, "must be truth or corrupted"):
+            ClockEmulator.from_config({
+                "clock_emulation": {
+                    "mapping_test": {"primary_timestamp_mode": "broken"},
+                },
+            })
+
+    def test_negative_corrupted_primary_timestamp_is_rejected(self) -> None:
+        emulator = ClockEmulator.from_config({
+            "clock_emulation": {
+                "enabled": True,
+                "mapping_test": {
+                    "primary_timestamp_mode": "corrupted",
+                    "lidar_offset_ms": -100,
+                },
+            },
+        })
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            emulator.primary_sample("lidar", 50_000_000, 1)
+
     def test_invalid_timeline_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "earlier lose_lock"):
             ClockEmulator.from_config({

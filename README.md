@@ -161,10 +161,14 @@ and head height. It is independent of the rendered depth buffer, so side and
 rear obstacles do not require turning the first-person camera.
 
 For clock-synchronization benchmarks, the optional `clock_emulation` config
-keeps those established topics on exact Minecraft truth time and adds raw
-device-clock shadows. The camera shadows emulate RealSense hardware uptime;
-the LiDAR shadow emulates a PTP-disciplined clock with configurable initial
-lock, locked residual error, holdover drift, and step or slew relocking:
+adds raw device-clock shadows. The camera shadows emulate RealSense hardware
+uptime; the LiDAR shadow emulates a PTP-disciplined clock with configurable
+initial lock, locked residual error, holdover drift, and step or slew
+relocking. Established capability topics use exact Minecraft truth time by
+default. `mapping_test.primary_timestamp_mode: corrupted` instead applies
+configurable common-domain residual offsets directly to those topics, so an
+existing RTAB-Map deployment can demonstrate the effect before a correction
+module is available:
 
 ```yaml
 clock_emulation:
@@ -185,17 +189,30 @@ clock_emulation:
     relock_at_sec: 180
     relock_duration_sec: 10
     relock_mode: slew
+  mapping_test:
+    primary_timestamp_mode: truth  # truth | corrupted
+    camera_offset_ms: 100
+    lidar_offset_ms: 0
 ```
+
+In `corrupted` mode, RGB, depth, and CameraInfo receive the same camera offset,
+while LaserScan receives the LiDAR offset. A useful initial comparison for the
+default 20 Hz camera and 10 Hz LiDAR is a truth baseline followed by a run with
+the camera at `+100 ms` and the LiDAR at `0 ms`. Use a fresh RTAB-Map database
+for each run so an existing optimized map does not hide the difference.
+`corrupted` mode requires `clock_emulation.enabled: true`.
 
 The default raw topics are
 `/minecraft/time_sync/raw/camera/{rgb,depth,camera_info}` and
 `/minecraft/time_sync/raw/lidar/scan`. Each raw sample has a JSON truth record
 on `/minecraft/time_sync/diagnostics`, including `capture_truth_ns`, device
-timestamp, injected offset, drift, sequence, and lock state. A synchronization
-module should consume the raw topics and publish corrected common-clock topics;
-RTAB-Map can then be remapped to those corrected outputs. Topic names can be
-overridden under `clock_emulation.topics` with the keys `rgb`, `depth`,
-`camera_info`, `lidar`, and `diagnostics`.
+timestamp, injected offset, drift, sequence, and lock state. In corrupted mode,
+the deliberately biased primary stamps are reported there as `camera_primary`
+and `lidar_primary` records as well. A synchronization module should consume
+the raw topics and publish corrected common-clock topics; RTAB-Map can then be
+remapped to those corrected outputs. Topic names can be overridden under
+`clock_emulation.topics` with the keys `rgb`, `depth`, `camera_info`, `lidar`,
+and `diagnostics`.
 
 The provider also publishes exact semantic observations for visible chests,
 trapped chests, crafting tables, furnaces, empty cauldrons, and water

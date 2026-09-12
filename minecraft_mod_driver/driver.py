@@ -1076,17 +1076,45 @@ def camera_stream_loop() -> None:
                     or rgb.header.stamp.nanosec != depth.header.stamp.nanosec
                 ):
                     raise ValueError("RGB and depth simulation capture stamps differ")
-                publish_ros_image(rgb_publisher, rgb)
                 depth_view = depth_result.get("depthView") or {}
-                publish_intrinsics(
-                    depth.width,
-                    depth.height,
-                    float(depth_view.get("verticalFovDeg") or 0.0),
-                    depth.header.stamp,
-                )
-                publish_ros_image(depth_publisher, depth)
-                if clock_emulator.enabled:
+                truth_ns: int | None = None
+                sequence_id: int | None = None
+                if clock_emulator.corrupt_primary_timestamps:
                     truth_ns, sequence_id = capture_identity(depth_view)
+                    primary_sample = clock_emulator.primary_sample(
+                        "camera", truth_ns, sequence_id,
+                    )
+                    primary_stamp = device_stamp(primary_sample.device_timestamp_ns)
+                    publish_ros_image(
+                        rgb_publisher,
+                        rgb,
+                        timestamp_ns=primary_sample.device_timestamp_ns,
+                    )
+                    publish_intrinsics_to(
+                        intrinsics_publisher,
+                        depth.width,
+                        depth.height,
+                        float(depth_view.get("verticalFovDeg") or 0.0),
+                        primary_stamp,
+                    )
+                    publish_ros_image(
+                        depth_publisher,
+                        depth,
+                        timestamp_ns=primary_sample.device_timestamp_ns,
+                    )
+                    publish_clock_diagnostic(primary_sample, depth_view)
+                else:
+                    publish_ros_image(rgb_publisher, rgb)
+                    publish_intrinsics(
+                        depth.width,
+                        depth.height,
+                        float(depth_view.get("verticalFovDeg") or 0.0),
+                        depth.header.stamp,
+                    )
+                    publish_ros_image(depth_publisher, depth)
+                if clock_emulator.enabled:
+                    if truth_ns is None or sequence_id is None:
+                        truth_ns, sequence_id = capture_identity(depth_view)
                     sample = clock_emulator.realsense_sample(truth_ns, sequence_id)
                     raw_stamp = device_stamp(sample.device_timestamp_ns)
                     publish_ros_image(
@@ -1193,10 +1221,24 @@ def lidar_stream_loop() -> None:
                 "ray_count": lidar_ray_count,
                 "range_max": lidar_range_max,
             })
-            publish_lidar_scan(result)
-            if clock_emulator.enabled:
-                scan = result.get("lidarScan") or {}
+            scan = result.get("lidarScan") or {}
+            truth_ns: int | None = None
+            sequence_id: int | None = None
+            if clock_emulator.corrupt_primary_timestamps:
                 truth_ns, sequence_id = capture_identity(scan)
+                primary_sample = clock_emulator.primary_sample(
+                    "lidar", truth_ns, sequence_id,
+                )
+                publish_lidar_scan(
+                    result,
+                    timestamp_ns=primary_sample.device_timestamp_ns,
+                )
+                publish_clock_diagnostic(primary_sample, scan)
+            else:
+                publish_lidar_scan(result)
+            if clock_emulator.enabled:
+                if truth_ns is None or sequence_id is None:
+                    truth_ns, sequence_id = capture_identity(scan)
                 sample = clock_emulator.lidar_ptp_sample(truth_ns, sequence_id)
                 publish_lidar_scan(
                     result,

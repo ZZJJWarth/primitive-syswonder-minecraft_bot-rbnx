@@ -50,6 +50,13 @@ class _PtpConfig:
     relock_mode: str
 
 
+@dataclass(frozen=True)
+class _MappingTestConfig:
+    primary_timestamp_mode: str
+    camera_offset_ns: int
+    lidar_offset_ns: int
+
+
 class ClockEmulator:
     """Map Minecraft truth into reproducible device-clock domains.
 
@@ -65,11 +72,13 @@ class ClockEmulator:
         seed: int,
         realsense: _RealSenseConfig,
         lidar_ptp: _PtpConfig,
+        mapping_test: _MappingTestConfig,
     ) -> None:
         self.enabled = enabled
         self.seed = seed & _MASK_64
         self.realsense = realsense
         self.lidar_ptp = lidar_ptp
+        self.mapping_test = mapping_test
         self._origin_truth_ns: int | None = None
         self._lock = threading.Lock()
 
@@ -161,7 +170,81 @@ class ClockEmulator:
             ),
             relock_mode=relock_mode,
         )
-        return cls(enabled=enabled, seed=seed, realsense=realsense, lidar_ptp=lidar_ptp)
+        mapping_raw = raw.get("mapping_test") or {}
+        if not isinstance(mapping_raw, dict):
+            raise ValueError("clock_emulation.mapping_test must be a mapping")
+        primary_timestamp_mode = str(
+            mapping_raw.get("primary_timestamp_mode", "truth")
+        ).strip().lower()
+        if primary_timestamp_mode not in {"truth", "corrupted"}:
+            raise ValueError(
+                "clock_emulation.mapping_test.primary_timestamp_mode "
+                "must be truth or corrupted"
+            )
+        if primary_timestamp_mode == "corrupted" and not enabled:
+            raise ValueError("corrupted primary timestamps require clock_emulation.enabled=true")
+        mapping_test = _MappingTestConfig(
+            primary_timestamp_mode=primary_timestamp_mode,
+            camera_offset_ns=_milliseconds_ns(
+                mapping_raw.get("camera_offset_ms", 100.0),
+                "clock_emulation.mapping_test.camera_offset_ms",
+                signed=True,
+            ),
+            lidar_offset_ns=_milliseconds_ns(
+                mapping_raw.get("lidar_offset_ms", 0.0),
+                "clock_emulation.mapping_test.lidar_offset_ms",
+                signed=True,
+            ),
+        )
+        return cls(
+            enabled=enabled,
+            seed=seed,
+            realsense=realsense,
+            lidar_ptp=lidar_ptp,
+            mapping_test=mapping_test,
+        )
+
+    @property
+    def corrupt_primary_timestamps(self) -> bool:
+        """Whether established capability topics should carry bad common-domain stamps."""
+        return self.mapping_test.primary_timestamp_mode == "corrupted"
+
+    def primary_sample(
+        self,
+        sensor: str,
+        truth_ns: int,
+        sequence_id: int,
+    ) -> ClockSample:
+        """Create a truth or deliberately biased common-domain primary stamp."""
+        if sensor not in {"camera", "lidar"}:
+            raise ValueError("primary clock sensor must be camera or lidar")
+        if isinstance(truth_ns, bool) or not isinstance(truth_ns, int) or truth_ns < 0:
+            raise ValueError("capture truth must be a non-negative integer nanosecond stamp")
+        if (
+            isinstance(sequence_id, bool)
+            or not isinstance(sequence_id, int)
+            or sequence_id < 0
+        ):
+            raise ValueError("capture sequence must be a non-negative integer")
+        offset_ns = (
+            self.mapping_test.camera_offset_ns
+            if sensor == "camera"
+            else self.mapping_test.lidar_offset_ns
+        )
+        if not self.corrupt_primary_timestamps:
+            offset_ns = 0
+        timestamp_ns = truth_ns + offset_ns
+        if timestamp_ns < 0:
+            raise ValueError("corrupted primary timestamp cannot be negative")
+        return ClockSample(
+            sensor=f"{sensor}_primary",
+            state="CORRUPTED" if self.corrupt_primary_timestamps else "TRUTH",
+            sequence_id=sequence_id,
+            capture_truth_ns=truth_ns,
+            device_timestamp_ns=timestamp_ns,
+            injected_offset_ns=offset_ns,
+            drift_ppm=0.0,
+        )
 
     def realsense_sample(self, truth_ns: int, sequence_id: int) -> ClockSample:
         """Return a RealSense-style hardware-uptime timestamp."""
