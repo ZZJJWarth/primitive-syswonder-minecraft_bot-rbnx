@@ -134,7 +134,11 @@ actual scaled depth dimensions, so Scene receives calibration that matches
 each capture size.
 Depth and odometry headers retain their client-side capture timestamps so map
 services can associate each frame with the corresponding player pose. In
-simulation-time mode, RGB and depth are selected from the same Minecraft tick.
+simulation-time mode, rendered sensors use the Minecraft tick plus the render
+partial-tick fraction instead of quantizing every capture to the 50 ms world
+tick. RGB and depth are selected only when their complete sub-tick capture
+timestamps match. The collision LiDAR uses the same continuous clock and
+interpolates player position and yaw to its own sampling fraction.
 The odometry frame uses ROS ENU
 coordinates (`x` east, `y` north), treats one block as one metre, and places
 `minecraft_view_base` at the configurable nominal eye height. This navigation
@@ -311,9 +315,10 @@ that process itself. Only one wrapper may use a display at a time. Set
 - `RBNX_MINECRAFT_LIDAR_RANGE_MAX`: maximum collision-ray distance in metres,
   default `16`; valid range `1` through `64`.
 - `RBNX_MINECRAFT_USE_SIM_TIME`: when `true`, publishes Minecraft's monotonic
-  `gameTime` on `/clock` and stamps RGB, depth, CameraInfo, LiDAR, odometry,
-  TF, and ground truth from that clock. RGB-D output is rejected unless both
-  latest frames belong to the same game tick. Default `false` preserves the
+  `gameTime` plus render partial-tick time on `/clock`. RGB, depth, CameraInfo,
+  and LiDAR carry sub-tick capture stamps; RGB-D output is rejected unless both
+  frames have the same complete capture time. Odometry, TF, and ground truth
+  retain their authoritative world-tick stamps. Default `false` preserves the
   wall-clock deployment mode.
 - `RBNX_MINECRAFT_GROUND_TRUTH_TOPIC`: exact pose stream reserved for benchmark
   scoring, default `/minecraft/ground_truth/pose`.

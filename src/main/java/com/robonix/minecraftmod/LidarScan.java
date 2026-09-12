@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -38,10 +39,15 @@ public final class LidarScan {
         if (!Double.isFinite(rangeMax) || rangeMax < 1.0 || rangeMax > 64.0) {
             throw new IllegalArgumentException("lidar range_max must be from 1 through 64 metres");
         }
-        SimulationClock.SampleContext sample = simulationClock.capture(minecraft);
+        float partialTick = minecraft.getPartialTick();
+        SimulationClock.SampleContext sample = simulationClock.capture(minecraft, partialTick);
+        partialTick = sample.partialTick();
 
         double angleIncrement = Math.PI * 2.0 / rayCount;
-        double yaw = Math.toRadians(player.getYRot());
+        double playerX = Mth.lerp((double) partialTick, player.xo, player.getX());
+        double playerY = Mth.lerp((double) partialTick, player.yo, player.getY());
+        double playerZ = Mth.lerp((double) partialTick, player.zo, player.getZ());
+        double yaw = Math.toRadians(Mth.rotLerp(partialTick, player.yRotO, player.getYRot()));
         double forwardX = -Math.sin(yaw);
         double forwardZ = Math.cos(yaw);
         JsonArray ranges = new JsonArray();
@@ -51,7 +57,7 @@ public final class LidarScan {
             double directionZ = forwardZ * Math.cos(angle) - forwardX * Math.sin(angle);
             double nearest = Double.POSITIVE_INFINITY;
             for (double height : SENSOR_HEIGHTS) {
-                Vec3 start = new Vec3(player.getX(), player.getY() + height, player.getZ());
+                Vec3 start = new Vec3(playerX, playerY + height, playerZ);
                 Vec3 end = start.add(directionX * rangeMax, 0.0, directionZ * rangeMax);
                 BlockHitResult hit = level.clip(new ClipContext(
                         start,
@@ -74,7 +80,9 @@ public final class LidarScan {
         scan.addProperty("schemaVersion", 1);
         scan.addProperty("type", "minecraft_collision_lidar");
         scan.addProperty("tickId", sample.tickId());
+        scan.addProperty("partialTick", sample.partialTick());
         scan.addProperty("simTimeNanos", sample.simTimeNanos());
+        scan.addProperty("captureSequence", sample.captureSequence());
         scan.addProperty("timestampMs", System.currentTimeMillis());
         scan.addProperty("angleMin", ANGLE_MIN);
         scan.addProperty("angleMax", ANGLE_MIN + (rayCount - 1) * angleIncrement);

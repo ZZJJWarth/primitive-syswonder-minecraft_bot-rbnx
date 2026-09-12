@@ -53,7 +53,7 @@ public final class DepthCapture implements AutoCloseable {
             return;
         }
         lastCaptureNanos = now;
-        readDepthBuffer();
+        readDepthBuffer(event.getPartialTick());
     }
 
     /** Returns a recent depth frame or null when capture is unavailable or stale. */
@@ -75,9 +75,9 @@ public final class DepthCapture implements AutoCloseable {
     }
 
     /** Copies GPU depth on the render thread and schedules CPU linearization. */
-    private void readDepthBuffer() {
+    private void readDepthBuffer(float partialTick) {
         Minecraft minecraft = Minecraft.getInstance();
-        SimulationClock.SampleContext sample = simulationClock.capture(minecraft);
+        SimulationClock.SampleContext sample = simulationClock.capture(minecraft, partialTick);
         long capturedWallMillis = System.currentTimeMillis();
         long capturedWallNanos = System.nanoTime();
         RenderTarget target = minecraft.getMainRenderTarget();
@@ -166,7 +166,8 @@ public final class DepthCapture implements AutoCloseable {
             }
             if (!closed.get() && !Thread.currentThread().isInterrupted()) {
                 Frame frame = new Frame(output.array(), width, height,
-                        sample.tickId(), sample.simTimeNanos(),
+                        sample.tickId(), sample.partialTick(), sample.simTimeNanos(),
+                        sample.captureSequence(),
                         capturedWallMillis, capturedWallNanos);
                 latest.set(frame);
                 synchronized (this) {
@@ -225,7 +226,9 @@ public final class DepthCapture implements AutoCloseable {
             int width,
             int height,
             long tickId,
+            float partialTick,
             long simTimeNanos,
+            long captureSequence,
             long timestampMs,
             long capturedWallNanos
     ) {}

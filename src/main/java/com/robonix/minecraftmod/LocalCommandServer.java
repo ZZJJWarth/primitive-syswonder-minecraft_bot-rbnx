@@ -280,7 +280,9 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
         view.addProperty("tickId", frame.tickId());
+        view.addProperty("partialTick", frame.partialTick());
         view.addProperty("simTimeNanos", frame.simTimeNanos());
+        view.addProperty("captureSequence", frame.captureSequence());
         view.addProperty("timestampMs", frame.timestampMs());
         view.add("image", image);
         JsonObject result = new JsonObject();
@@ -304,7 +306,9 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
         view.addProperty("tickId", frame.tickId());
+        view.addProperty("partialTick", frame.partialTick());
         view.addProperty("simTimeNanos", frame.simTimeNanos());
+        view.addProperty("captureSequence", frame.captureSequence());
         view.addProperty("timestampMs", frame.timestampMs());
         view.addProperty("verticalFovDeg", Minecraft.getInstance().options.fov().get());
         view.addProperty("unit", "metre");
@@ -320,15 +324,17 @@ public final class LocalCommandServer implements AutoCloseable {
         DepthCapture.Frame depthFrame = null;
         for (FrameCapture.Frame candidateRgb : frameCapture.recent()) {
             for (DepthCapture.Frame candidateDepth : depthCapture.recent()) {
-                if (candidateRgb.tickId() == candidateDepth.tickId()
-                        && (rgbFrame == null || candidateRgb.tickId() > rgbFrame.tickId())) {
+                if (candidateRgb.simTimeNanos() == candidateDepth.simTimeNanos()
+                        && (rgbFrame == null
+                        || candidateRgb.simTimeNanos() > rgbFrame.simTimeNanos())) {
                     rgbFrame = candidateRgb;
                     depthFrame = candidateDepth;
                 }
             }
         }
         if (rgbFrame == null || depthFrame == null) {
-            throw new IllegalStateException("latest RGB and depth frames are from different simulation ticks");
+            throw new IllegalStateException(
+                    "latest RGB and depth frames have different simulation capture times");
         }
         JsonObject rendered = renderedView(rgbFrame);
         JsonObject depthView = depthView(depthFrame);
@@ -349,7 +355,9 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
         view.addProperty("tickId", frame.tickId());
+        view.addProperty("partialTick", frame.partialTick());
         view.addProperty("simTimeNanos", frame.simTimeNanos());
+        view.addProperty("captureSequence", frame.captureSequence());
         view.addProperty("timestampMs", frame.timestampMs());
         view.add("image", image);
         return view;
@@ -366,7 +374,9 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("width", frame.width());
         view.addProperty("height", frame.height());
         view.addProperty("tickId", frame.tickId());
+        view.addProperty("partialTick", frame.partialTick());
         view.addProperty("simTimeNanos", frame.simTimeNanos());
+        view.addProperty("captureSequence", frame.captureSequence());
         view.addProperty("timestampMs", frame.timestampMs());
         view.addProperty("verticalFovDeg", Minecraft.getInstance().options.fov().get());
         view.addProperty("unit", "metre");

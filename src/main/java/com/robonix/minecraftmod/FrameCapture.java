@@ -67,9 +67,11 @@ public final class FrameCapture implements AutoCloseable {
         lastCaptureNanos = now;
         NativeImage image = null;
         try {
-            SimulationClock.SampleContext sample = simulationClock.capture(Minecraft.getInstance());
+            Minecraft minecraft = Minecraft.getInstance();
+            SimulationClock.SampleContext sample = simulationClock.capture(
+                    minecraft, minecraft.getPartialTick());
             long capturedWallMillis = System.currentTimeMillis();
-            image = Screenshot.takeScreenshot(Minecraft.getInstance().getMainRenderTarget());
+            image = Screenshot.takeScreenshot(minecraft.getMainRenderTarget());
             NativeImage ownedImage = image;
             encoder.execute(() -> encode(ownedImage, sample, capturedWallMillis, now));
         } catch (RuntimeException exception) {
@@ -110,7 +112,8 @@ public final class FrameCapture implements AutoCloseable {
             BufferedImage buffered = scale(image, outputWidth, outputHeight);
             byte[] data = writeJpeg(buffered, jpegQuality);
             Frame frame = new Frame(data, buffered.getWidth(), buffered.getHeight(),
-                    sample.tickId(), sample.simTimeNanos(), capturedWallMillis, capturedWallNanos);
+                    sample.tickId(), sample.partialTick(), sample.simTimeNanos(),
+                    sample.captureSequence(), capturedWallMillis, capturedWallNanos);
             latest.set(frame);
             synchronized (this) {
                 history.addLast(frame);
@@ -205,7 +208,9 @@ public final class FrameCapture implements AutoCloseable {
             int width,
             int height,
             long tickId,
+            float partialTick,
             long simTimeNanos,
+            long captureSequence,
             long timestampMs,
             long capturedWallNanos
     ) {}
