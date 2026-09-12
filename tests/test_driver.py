@@ -26,12 +26,14 @@ from minecraft_mod_driver.driver import (
     cmd_vel_payload,
     camera_quaternion_from_pitch,
     configured_cmd_vel_bridge,
+    configured_clock_emulation,
     configured_eye_height,
     configured_frequency,
     configured_lidar_range,
     configured_lidar_ray_count,
     configured_route_inspection,
     configured_use_sim_time,
+    capture_identity,
     depth_view_to_image,
     execute_move_command,
     observation_pose,
@@ -218,6 +220,31 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertFalse(configured_use_sim_time({"use_sim_time": False}))
         with self.assertRaisesRegex(ValueError, "boolean"):
             configured_use_sim_time({"use_sim_time": "yes"})
+
+    def test_clock_emulation_topics_are_explicit_and_unique(self) -> None:
+        """Keep raw device-clock streams separate from truth topics."""
+        emulator, topics = configured_clock_emulation({
+            "clock_emulation": {
+                "enabled": True,
+                "topics": {"lidar": "/test/raw/lidar"},
+            },
+        })
+        self.assertTrue(emulator.enabled)
+        self.assertEqual(topics[3], "/test/raw/lidar")
+        self.assertEqual(len(topics), len(set(topics)))
+        with self.assertRaisesRegex(ValueError, "fully-qualified"):
+            configured_clock_emulation({
+                "clock_emulation": {"topics": {"depth": "relative/depth"}},
+            })
+
+    def test_capture_identity_requires_integer_truth_metadata(self) -> None:
+        """Do not emulate a hardware clock from publication or wall time."""
+        self.assertEqual(
+            capture_identity({"simTimeNanos": 123, "captureSequence": 7}),
+            (123, 7),
+        )
+        with self.assertRaisesRegex(ValueError, "captureSequence"):
+            capture_identity({"simTimeNanos": 123})
 
     def test_cmd_vel_bridge_configuration_is_bounded(self) -> None:
         """Reject ambiguous topics and unsafe command/deadman limits."""
@@ -1549,6 +1576,109 @@ class MinecraftModClientTest(unittest.TestCase):
         )
         stamp = intrinsics.call_args.args[3]
         self.assertEqual((stamp.sec, stamp.nanosec), (12, 350_000_000))
+
+    def test_sim_camera_stream_adds_realsense_uptime_shadows(self) -> None:
+        """Keep truth topics intact while publishing raw device-clock copies."""
+        buffer = BytesIO()
+        PILImage.new("RGB", (1, 1), (20, 40, 60)).save(buffer, format="JPEG")
+        sample = {
+            "renderedView": {
+                "width": 1,
+                "height": 1,
+                "tickId": 247,
+                "partialTick": 0.5,
+                "captureSequence": 10,
+                "simTimeNanos": 12_375_000_000,
+                "image": {"dataUrl": "data:image/jpeg;base64,"
+                          + base64.b64encode(buffer.getvalue()).decode("ascii")},
+            },
+            "depthView": {
+                "width": 1,
+                "height": 1,
+                "tickId": 247,
+                "partialTick": 0.5,
+                "captureSequence": 11,
+                "simTimeNanos": 12_375_000_000,
+                "verticalFovDeg": 70.0,
+                "image": {
+                    "encoding": "32FC1",
+                    "dataUrl": "data:application/octet-stream;base64,"
+                    + base64.b64encode(b"\x00\x00\x80?").decode("ascii"),
+                },
+            },
+        }
+        emulator = driver.ClockEmulator.from_config({
+            "clock_emulation": {
+                "enabled": True,
+                "realsense": {"initial_uptime_sec": 5, "drift_ppm": 0, "jitter_ms": 0},
+            },
+        })
+        published: list[tuple[object, int | None]] = []
+
+        def publish(publisher, _image, *, timestamp_ns=None) -> None:
+            published.append((publisher, timestamp_ns))
+            if len(published) == 4:
+                driver.camera_stream_stop.set()
+
+        driver.camera_stream_stop.clear()
+        try:
+            with (
+                patch.object(driver, "use_sim_time", True),
+                patch.object(driver, "clock_emulator", emulator),
+                patch.object(driver.client, "request", return_value=sample),
+                patch.object(driver, "publish_intrinsics"),
+                patch.object(driver, "publish_intrinsics_to") as raw_info,
+                patch.object(driver, "publish_clock_diagnostic") as diagnostic,
+                patch.object(driver, "publish_ros_image", side_effect=publish),
+                patch.object(driver, "raw_rgb_publisher", "raw-rgb"),
+                patch.object(driver, "raw_depth_publisher", "raw-depth"),
+                patch.object(driver, "raw_intrinsics_publisher", "raw-info"),
+            ):
+                driver.camera_stream_loop()
+        finally:
+            driver.camera_stream_stop.clear()
+        self.assertEqual(published[-2:], [("raw-rgb", 5_000_000_000),
+                                          ("raw-depth", 5_000_000_000)])
+        self.assertEqual(raw_info.call_args.args[0], "raw-info")
+        diagnostic.assert_called_once()
+
+    def test_lidar_stream_adds_ptp_shadow(self) -> None:
+        """Publish a PTP-stamped scan beside the original truth scan."""
+        result = {
+            "lidarScan": {
+                "tickId": 20,
+                "partialTick": 0.25,
+                "captureSequence": 9,
+                "simTimeNanos": 1_012_500_000,
+            },
+        }
+        emulator = driver.ClockEmulator.from_config({
+            "clock_emulation": {
+                "enabled": True,
+                "lidar_ptp": {"locked_offset_us": 100, "locked_jitter_us": 0},
+            },
+        })
+        published: list[tuple[object | None, int | None]] = []
+
+        def publish(_result, *, publisher=None, timestamp_ns=None) -> None:
+            published.append((publisher, timestamp_ns))
+            if len(published) == 2:
+                driver.lidar_stream_stop.set()
+
+        driver.lidar_stream_stop.clear()
+        try:
+            with (
+                patch.object(driver, "clock_emulator", emulator),
+                patch.object(driver.client, "request", return_value=result),
+                patch.object(driver, "publish_lidar_scan", side_effect=publish),
+                patch.object(driver, "publish_clock_diagnostic") as diagnostic,
+                patch.object(driver, "raw_lidar_publisher", "raw-lidar"),
+            ):
+                driver.lidar_stream_loop()
+        finally:
+            driver.lidar_stream_stop.clear()
+        self.assertEqual(published, [(None, None), ("raw-lidar", 1_012_600_000)])
+        diagnostic.assert_called_once()
 
     def test_publish_intrinsics_uses_depth_shape_and_vertical_fov(self) -> None:
         """Publish a latched-compatible pinhole matrix for the captured frame."""

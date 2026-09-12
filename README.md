@@ -160,6 +160,43 @@ The provider also publishes `/minecraft/lidar/scan` through
 and head height. It is independent of the rendered depth buffer, so side and
 rear obstacles do not require turning the first-person camera.
 
+For clock-synchronization benchmarks, the optional `clock_emulation` config
+keeps those established topics on exact Minecraft truth time and adds raw
+device-clock shadows. The camera shadows emulate RealSense hardware uptime;
+the LiDAR shadow emulates a PTP-disciplined clock with configurable initial
+lock, locked residual error, holdover drift, and step or slew relocking:
+
+```yaml
+clock_emulation:
+  enabled: true
+  seed: 42
+  realsense:
+    initial_uptime_sec: 5
+    drift_ppm: 50
+    jitter_ms: 1
+    reset_at_sec: null
+  lidar_ptp:
+    initial_offset_ms: 30
+    oscillator_drift_ppm: 20
+    locked_offset_us: 100
+    locked_jitter_us: 50
+    lock_after_sec: 5
+    lose_lock_at_sec: 120
+    relock_at_sec: 180
+    relock_duration_sec: 10
+    relock_mode: slew
+```
+
+The default raw topics are
+`/minecraft/time_sync/raw/camera/{rgb,depth,camera_info}` and
+`/minecraft/time_sync/raw/lidar/scan`. Each raw sample has a JSON truth record
+on `/minecraft/time_sync/diagnostics`, including `capture_truth_ns`, device
+timestamp, injected offset, drift, sequence, and lock state. A synchronization
+module should consume the raw topics and publish corrected common-clock topics;
+RTAB-Map can then be remapped to those corrected outputs. Topic names can be
+overridden under `clock_emulation.topics` with the keys `rgb`, `depth`,
+`camera_info`, `lidar`, and `diagnostics`.
+
 The provider also publishes exact semantic observations for visible chests,
 trapped chests, crafting tables, furnaces, empty cauldrons, and water
 cauldrons, plus currently visible live zombies identified by Entity UUID.

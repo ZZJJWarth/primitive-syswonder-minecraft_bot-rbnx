@@ -20,6 +20,7 @@ from typing import Any
 
 from robonix_api import Err, Ok, Primitive
 from robonix_api.ros import RosBackend
+from minecraft_mod_driver.clock_emulation import ClockEmulator, ClockSample
 import chassis_mcp  # noqa: E402
 import minecraft_mcp  # noqa: E402
 import chassis_pb2  # noqa: E402
@@ -50,6 +51,11 @@ odom_publisher = None
 objects_publisher = None
 lidar_publisher = None
 clock_publisher = None
+raw_rgb_publisher = None
+raw_depth_publisher = None
+raw_intrinsics_publisher = None
+raw_lidar_publisher = None
+clock_diagnostics_publisher = None
 ground_truth_publisher = None
 odom_transform_broadcaster = None
 camera_transform_broadcaster = None
@@ -131,6 +137,17 @@ route_inspection_sample_spacing_m = 0.25
 route_inspection_max_blocks = 64
 use_sim_time = False
 ground_truth_topic = "/minecraft/ground_truth/pose"
+clock_emulator = ClockEmulator.from_config({})
+DEFAULT_RAW_RGB_TOPIC = "/minecraft/time_sync/raw/camera/rgb"
+DEFAULT_RAW_DEPTH_TOPIC = "/minecraft/time_sync/raw/camera/depth"
+DEFAULT_RAW_INTRINSICS_TOPIC = "/minecraft/time_sync/raw/camera/camera_info"
+DEFAULT_RAW_LIDAR_TOPIC = "/minecraft/time_sync/raw/lidar/scan"
+DEFAULT_CLOCK_DIAGNOSTICS_TOPIC = "/minecraft/time_sync/diagnostics"
+raw_rgb_topic = DEFAULT_RAW_RGB_TOPIC
+raw_depth_topic = DEFAULT_RAW_DEPTH_TOPIC
+raw_intrinsics_topic = DEFAULT_RAW_INTRINSICS_TOPIC
+raw_lidar_topic = DEFAULT_RAW_LIDAR_TOPIC
+clock_diagnostics_topic = DEFAULT_CLOCK_DIAGNOSTICS_TOPIC
 
 
 class MinecraftModClient:
@@ -250,6 +267,30 @@ def split_timestamp(timestamp_sec: float) -> tuple[int, int]:
         sec += 1
         nanosec -= 1_000_000_000
     return sec, nanosec
+
+
+def split_timestamp_ns(timestamp_ns: int) -> tuple[int, int]:
+    """Split an exact non-negative device timestamp without float conversion."""
+    if isinstance(timestamp_ns, bool) or not isinstance(timestamp_ns, int) or timestamp_ns < 0:
+        raise ValueError("timestamp_ns must be a non-negative integer")
+    return divmod(timestamp_ns, 1_000_000_000)
+
+
+def capture_identity(payload: dict[str, Any]) -> tuple[int, int]:
+    """Read exact benchmark truth and sequence metadata emitted by the Mod."""
+    truth_ns = payload.get("simTimeNanos")
+    sequence_id = payload.get("captureSequence")
+    if isinstance(truth_ns, bool) or not isinstance(truth_ns, int) or truth_ns < 0:
+        raise ValueError("clock emulation requires a non-negative integer simTimeNanos")
+    if isinstance(sequence_id, bool) or not isinstance(sequence_id, int) or sequence_id < 0:
+        raise ValueError("clock emulation requires a non-negative integer captureSequence")
+    return truth_ns, sequence_id
+
+
+def device_stamp(timestamp_ns: int) -> builtin_interfaces_mcp.Time:
+    """Build the common stamp shape accepted by ROS and MCP conversion helpers."""
+    sec, nanosec = split_timestamp_ns(timestamp_ns)
+    return builtin_interfaces_mcp.Time(sec=sec, nanosec=nanosec)
 
 
 def capture_timestamp(payload: dict[str, Any]) -> float | None:
@@ -393,16 +434,26 @@ def lidar_scan_values(result: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
-def publish_lidar_scan(result: dict[str, Any]) -> None:
+def publish_lidar_scan(
+    result: dict[str, Any],
+    *,
+    publisher: Any | None = None,
+    timestamp_ns: int | None = None,
+) -> None:
     """Publish one validated body-relative collision scan as ROS LaserScan."""
-    if lidar_publisher is None:
+    target_publisher = publisher if publisher is not None else lidar_publisher
+    if target_publisher is None:
         raise RuntimeError("lidar publisher is not initialized")
     from sensor_msgs.msg import LaserScan  # type: ignore
 
     values = lidar_scan_values(result)
     message = LaserScan()
-    timestamp = values["timestamp"]
-    message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp(timestamp)
+    if timestamp_ns is None:
+        message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp(
+            values["timestamp"],
+        )
+    else:
+        message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp_ns(timestamp_ns)
     message.header.frame_id = lidar_frame_id
     message.angle_min = values["angle_min"]
     message.angle_max = values["angle_max"]
@@ -412,18 +463,26 @@ def publish_lidar_scan(result: dict[str, Any]) -> None:
     message.range_min = values["range_min"]
     message.range_max = values["range_max"]
     message.ranges = values["ranges"]
-    lidar_publisher.publish(message)
+    target_publisher.publish(message)
 
 
-def publish_ros_image(publisher: Any, image: Image) -> None:
+def publish_ros_image(
+    publisher: Any,
+    image: Image,
+    *,
+    timestamp_ns: int | None = None,
+) -> None:
     """Publish one validated MCP image through the equivalent ROS message."""
     if image.encoding == "error":
         raise RuntimeError(bytes(image.data).decode("utf-8", errors="replace"))
     from sensor_msgs.msg import Image as RosImage  # type: ignore
 
     message = RosImage()
-    message.header.stamp.sec = int(image.header.stamp.sec)
-    message.header.stamp.nanosec = int(image.header.stamp.nanosec)
+    if timestamp_ns is None:
+        message.header.stamp.sec = int(image.header.stamp.sec)
+        message.header.stamp.nanosec = int(image.header.stamp.nanosec)
+    else:
+        message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp_ns(timestamp_ns)
     message.header.frame_id = image.header.frame_id
     message.height = int(image.height)
     message.width = int(image.width)
@@ -640,6 +699,19 @@ def publish_intrinsics(
     """
     if intrinsics_publisher is None:
         raise RuntimeError("camera intrinsics publisher is not initialized")
+    publish_intrinsics_to(
+        intrinsics_publisher, width, height, vertical_fov_deg, stamp,
+    )
+
+
+def publish_intrinsics_to(
+    publisher: Any,
+    width: int,
+    height: int,
+    vertical_fov_deg: float,
+    stamp: Any,
+) -> None:
+    """Publish one CameraInfo on a selected truth or raw-device topic."""
     values = (float(width), float(height), float(vertical_fov_deg))
     if not all(math.isfinite(value) and value > 0.0 for value in values):
         raise ValueError("camera dimensions and vertical FOV must be positive and finite")
@@ -661,7 +733,21 @@ def publish_intrinsics(
     message.k = [focal, 0.0, cx, 0.0, focal, cy, 0.0, 0.0, 1.0]
     message.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
     message.p = [focal, 0.0, cx, 0.0, 0.0, focal, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
-    intrinsics_publisher.publish(message)
+    publisher.publish(message)
+
+
+def publish_clock_diagnostic(sample: ClockSample, payload: dict[str, Any]) -> None:
+    """Publish the hidden truth needed to score one emulated device stamp."""
+    if clock_diagnostics_publisher is None:
+        raise RuntimeError("clock diagnostics publisher is not initialized")
+    from std_msgs.msg import String  # type: ignore
+
+    diagnostic = sample.payload()
+    diagnostic["tick_id"] = payload.get("tickId")
+    diagnostic["partial_tick"] = payload.get("partialTick")
+    clock_diagnostics_publisher.publish(String(
+        data=json.dumps(diagnostic, separators=(",", ":"), sort_keys=True),
+    ))
 
 
 def publish_odom(observation: dict[str, Any], timestamp: float | None = None) -> None:
@@ -764,6 +850,29 @@ def configured_use_sim_time(config: dict[str, Any]) -> bool:
     if normalized in {"false", "0"}:
         return False
     raise ValueError("use_sim_time must be a boolean")
+
+
+def configured_clock_emulation(
+    config: dict[str, Any],
+) -> tuple[ClockEmulator, tuple[str, str, str, str, str]]:
+    """Build device clocks and validate their raw ROS topic namespace."""
+    emulator = ClockEmulator.from_config(config)
+    raw = config.get("clock_emulation") or {}
+    topics_raw = raw.get("topics") or {}
+    if not isinstance(topics_raw, dict):
+        raise ValueError("clock_emulation.topics must be a mapping")
+    topics = (
+        str(topics_raw.get("rgb") or DEFAULT_RAW_RGB_TOPIC),
+        str(topics_raw.get("depth") or DEFAULT_RAW_DEPTH_TOPIC),
+        str(topics_raw.get("camera_info") or DEFAULT_RAW_INTRINSICS_TOPIC),
+        str(topics_raw.get("lidar") or DEFAULT_RAW_LIDAR_TOPIC),
+        str(topics_raw.get("diagnostics") or DEFAULT_CLOCK_DIAGNOSTICS_TOPIC),
+    )
+    if any(not topic.startswith("/") or topic == "/" for topic in topics):
+        raise ValueError("clock emulation topics must be fully-qualified ROS names")
+    if len(set(topics)) != len(topics):
+        raise ValueError("clock emulation topics must be unique")
+    return emulator, topics
 
 
 def configured_lidar_ray_count(config: dict[str, Any]) -> int:
@@ -976,6 +1085,28 @@ def camera_stream_loop() -> None:
                     depth.header.stamp,
                 )
                 publish_ros_image(depth_publisher, depth)
+                if clock_emulator.enabled:
+                    truth_ns, sequence_id = capture_identity(depth_view)
+                    sample = clock_emulator.realsense_sample(truth_ns, sequence_id)
+                    raw_stamp = device_stamp(sample.device_timestamp_ns)
+                    publish_ros_image(
+                        raw_rgb_publisher,
+                        rgb,
+                        timestamp_ns=sample.device_timestamp_ns,
+                    )
+                    publish_intrinsics_to(
+                        raw_intrinsics_publisher,
+                        depth.width,
+                        depth.height,
+                        float(depth_view.get("verticalFovDeg") or 0.0),
+                        raw_stamp,
+                    )
+                    publish_ros_image(
+                        raw_depth_publisher,
+                        depth,
+                        timestamp_ns=sample.device_timestamp_ns,
+                    )
+                    publish_clock_diagnostic(sample, depth_view)
             except Exception as exc:  # noqa: BLE001
                 log_stream_error("RGB-D", exc)
         else:
@@ -1063,6 +1194,16 @@ def lidar_stream_loop() -> None:
                 "range_max": lidar_range_max,
             })
             publish_lidar_scan(result)
+            if clock_emulator.enabled:
+                scan = result.get("lidarScan") or {}
+                truth_ns, sequence_id = capture_identity(scan)
+                sample = clock_emulator.lidar_ptp_sample(truth_ns, sequence_id)
+                publish_lidar_scan(
+                    result,
+                    publisher=raw_lidar_publisher,
+                    timestamp_ns=sample.device_timestamp_ns,
+                )
+                publish_clock_diagnostic(sample, scan)
         except Exception as exc:  # noqa: BLE001
             log_stream_error("lidar", exc)
         lidar_stream_stop.wait(max(0.0, interval - (time.monotonic() - started)))
@@ -2090,10 +2231,14 @@ def initialize_camera(config: dict[str, Any]):
     """Initialize camera streams and the colocated chassis after Mod readiness."""
     global rgb_publisher, depth_publisher, extrinsics_publisher, intrinsics_publisher
     global objects_publisher, lidar_publisher, clock_publisher, use_sim_time
+    global raw_rgb_publisher, raw_depth_publisher, raw_intrinsics_publisher
+    global raw_lidar_publisher, clock_diagnostics_publisher, clock_emulator
     global camera_transform_broadcaster
     global camera_frame_id, base_frame_id, lidar_frame_id, eye_height
     global rgb_topic, depth_topic, extrinsics_topic, intrinsics_topic
     global odom_topic, odom_frame_id, objects_topic, lidar_topic
+    global raw_rgb_topic, raw_depth_topic, raw_intrinsics_topic, raw_lidar_topic
+    global clock_diagnostics_topic
     global camera_stream_hz, odom_stream_hz, lidar_stream_hz
     global lidar_ray_count, lidar_range_max
     global route_inspection_half_width_m, route_inspection_sample_spacing_m
@@ -2121,6 +2266,16 @@ def initialize_camera(config: dict[str, Any]):
         from std_msgs.msg import String  # type: ignore
 
         use_sim_time = configured_use_sim_time(config)
+        clock_emulator, emulation_topics = configured_clock_emulation(config)
+        if clock_emulator.enabled and not use_sim_time:
+            raise ValueError("clock emulation requires use_sim_time=true")
+        (
+            raw_rgb_topic,
+            raw_depth_topic,
+            raw_intrinsics_topic,
+            raw_lidar_topic,
+            clock_diagnostics_topic,
+        ) = emulation_topics
         camera_stream_hz = configured_frequency("RBNX_MINECRAFT_CAMERA_STREAM_HZ", 5.0)
         odom_stream_hz = configured_frequency("RBNX_MINECRAFT_ODOM_HZ", 10.0)
         lidar_stream_hz = configured_frequency("RBNX_MINECRAFT_LIDAR_HZ", 5.0)
@@ -2201,6 +2356,17 @@ def initialize_camera(config: dict[str, Any]):
             msg_type=LaserScan,
             qos="best_effort",
         )
+        if clock_emulator.enabled:
+            node = RosBackend.get().node
+            raw_rgb_publisher = node.create_publisher(RosImage, raw_rgb_topic, 10)
+            raw_depth_publisher = node.create_publisher(RosImage, raw_depth_topic, 10)
+            raw_intrinsics_publisher = node.create_publisher(
+                CameraInfo, raw_intrinsics_topic, 10,
+            )
+            raw_lidar_publisher = node.create_publisher(LaserScan, raw_lidar_topic, 10)
+            clock_diagnostics_publisher = node.create_publisher(
+                String, clock_diagnostics_topic, 10,
+            )
         from tf2_ros import TransformBroadcaster  # type: ignore
 
         camera_transform_broadcaster = TransformBroadcaster(
