@@ -32,6 +32,7 @@ from minecraft_mod_driver.driver import (
     configured_lidar_range,
     configured_lidar_ray_count,
     configured_route_inspection,
+    configured_sensor_time_descriptors,
     configured_use_sim_time,
     capture_identity,
     depth_view_to_image,
@@ -76,6 +77,63 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertIs(driver.minecraft_perception, driver.minecraft_mod)
         self.assertIs(driver.minecraft_lidar, driver.minecraft_mod)
         self.assertIs(driver.minecraft_actions, driver.minecraft_mod)
+
+    def test_clock_status_reports_latest_ptp_sample_without_truth(self) -> None:
+        """Expose only the LiDAR servo's hardware-facing status fields."""
+        emulator = driver.ClockEmulator.from_config({
+            "clock_emulation": {
+                "enabled": True,
+                "lidar_ptp": {"locked_offset_us": 100, "locked_jitter_us": 0},
+            },
+        })
+        sample = emulator.lidar_ptp_sample(8_000_000_000, 17)
+        with patch.object(driver, "clock_emulator", emulator):
+            driver.update_lidar_clock_status(sample)
+            response = driver.get_clock_status(SimpleNamespace(
+                schema_version=1,
+                domain_id="minecraft_lidar_ptp",
+            ))
+        self.assertTrue(response.ok)
+        self.assertEqual(
+            response.status.state,
+            driver.clock_pb2.ClockStatus.STATE_LOCKED,
+        )
+        self.assertEqual(response.status.sequence_id, 17)
+        self.assertEqual(response.status.master_offset_ns, 100_000)
+        self.assertFalse(hasattr(response.status, "capture_truth_ns"))
+
+    def test_clock_status_rejects_unknown_domain(self) -> None:
+        """Return the standard structured error for an unrelated domain."""
+        response = driver.get_clock_status(SimpleNamespace(
+            schema_version=1,
+            domain_id="other_clock",
+        ))
+        self.assertFalse(response.ok)
+        self.assertEqual(
+            response.error.code,
+            driver.clock_pb2.ClockStatusError.UNKNOWN_DOMAIN,
+        )
+
+    def test_clock_status_watch_yields_latest_ptp_sample(self) -> None:
+        """Start a watch with the latest snapshot without waiting for a new scan."""
+        emulator = driver.ClockEmulator.from_config({
+            "clock_emulation": {
+                "enabled": True,
+                "lidar_ptp": {"locked_offset_us": 100, "locked_jitter_us": 0},
+            },
+        })
+        sample = emulator.lidar_ptp_sample(8_000_000_000, 23)
+        context = Mock()
+        context.is_active.return_value = True
+        request = SimpleNamespace(schema_version=1, domain_id="minecraft_lidar_ptp")
+        with patch.object(driver, "clock_emulator", emulator):
+            driver.update_lidar_clock_status(sample)
+            stream = driver.watch_clock_status(request, context)
+            status = next(stream)
+            stream.close()
+        self.assertEqual(status.sequence_id, 23)
+        self.assertEqual(status.state, driver.clock_pb2.ClockStatus.STATE_LOCKED)
+        context.abort.assert_not_called()
 
     def test_aggregate_provider_uses_implicit_shared_lifecycle_contract(self) -> None:
         """Keep callbacks on one provider and let the runtime select shared Driver."""
@@ -236,6 +294,22 @@ class MinecraftModClientTest(unittest.TestCase):
             configured_clock_emulation({
                 "clock_emulation": {"topics": {"depth": "relative/depth"}},
             })
+
+    def test_device_mode_declares_sensor_clock_domains(self) -> None:
+        """Bind time metadata only when primary topics really use device clocks."""
+        truth = driver.ClockEmulator.from_config({})
+        self.assertEqual(configured_sensor_time_descriptors(truth), (None, None))
+        device = driver.ClockEmulator.from_config({
+            "clock_emulation": {
+                "enabled": True,
+                "mapping_test": {"primary_timestamp_mode": "device"},
+            },
+        })
+        camera, lidar = configured_sensor_time_descriptors(device)
+        self.assertEqual(camera.domain_id, "minecraft_realsense")
+        self.assertEqual(camera.timestamp_semantics, "exposure_midpoint")
+        self.assertEqual(lidar.domain_id, "minecraft_lidar_ptp")
+        self.assertEqual(lidar.timestamp_semantics, "scan_start")
 
     def test_capture_identity_requires_integer_truth_metadata(self) -> None:
         """Do not emulate a hardware clock from publication or wall time."""

@@ -169,7 +169,8 @@ relocking. Established capability topics use exact Minecraft truth time by
 default. `mapping_test.primary_timestamp_mode: corrupted` instead applies
 configurable common-domain residual offsets directly to those topics, so an
 existing RTAB-Map deployment can demonstrate the effect before a correction
-module is available:
+module is available. `device` puts those capability topics in the emulated
+RealSense uptime and LiDAR PTP domains for Chronos integration:
 
 ```yaml
 clock_emulation:
@@ -191,7 +192,7 @@ clock_emulation:
     relock_duration_sec: 10
     relock_mode: slew
   mapping_test:
-    primary_timestamp_mode: truth  # truth | corrupted
+    primary_timestamp_mode: truth  # truth | corrupted | device
     camera_offset_ms: 100
     lidar_offset_ms: 0
 ```
@@ -201,9 +202,18 @@ while LaserScan receives the LiDAR offset. A useful initial comparison for the
 default 20 Hz camera and 10 Hz LiDAR is a truth baseline followed by a run with
 the camera at `+100 ms` and the LiDAR at `0 ms`. Use a fresh RTAB-Map database
 for each run so an existing optimized map does not hide the difference.
-`corrupted` mode requires `clock_emulation.enabled: true`.
+`corrupted` and `device` modes require `clock_emulation.enabled: true`.
 
-The default raw topics are
+In `device` mode the RGB, depth, and CameraInfo capability declarations carry
+the `minecraft_realsense` time descriptor, while LaserScan carries
+`minecraft_lidar_ptp`. The same primitive implements
+`robonix/primitive/clock/get_status` and
+`robonix/primitive/clock/watch_status`; these expose the emulated LiDAR servo
+state, Grandmaster identity, measured offset, and uncertainty without exposing
+Minecraft capture truth. Chronos can therefore discover and gate the PTP
+domain through the same hardware-facing interface used by a real provider.
+
+The separate benchmark-shadow topics remain available at
 `/minecraft/time_sync/raw/camera/{rgb,depth,camera_info}` and
 `/minecraft/time_sync/raw/lidar/scan`. Each raw sample has a JSON truth record
 on `/minecraft/time_sync/diagnostics`, including `capture_truth_ns`, device

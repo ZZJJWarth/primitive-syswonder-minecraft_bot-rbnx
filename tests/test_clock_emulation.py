@@ -114,6 +114,31 @@ class ClockEmulatorTest(unittest.TestCase):
         self.assertEqual(sample.injected_offset_ns, 0)
         self.assertEqual(sample.state, "TRUTH")
 
+    def test_device_primary_mode_uses_each_native_clock_domain(self) -> None:
+        emulator = ClockEmulator.from_config({
+            "clock_emulation": {
+                "enabled": True,
+                "realsense": {
+                    "initial_uptime_sec": 5,
+                    "drift_ppm": 0,
+                    "jitter_ms": 0,
+                },
+                "lidar_ptp": {
+                    "locked_offset_us": 100,
+                    "locked_jitter_us": 0,
+                },
+                "mapping_test": {"primary_timestamp_mode": "device"},
+            },
+        })
+        camera = emulator.primary_sample("camera", 20_000_000_000, 1)
+        lidar = emulator.primary_sample("lidar", 20_000_000_000, 2)
+        self.assertTrue(emulator.override_primary_timestamps)
+        self.assertTrue(emulator.device_primary_timestamps)
+        self.assertEqual(camera.device_timestamp_ns, 5_000_000_000)
+        self.assertEqual(camera.state, "RUNNING")
+        self.assertEqual(lidar.device_timestamp_ns, 20_000_100_000)
+        self.assertEqual(lidar.state, "LOCKED")
+
     def test_invalid_primary_timestamp_configuration_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "require clock_emulation.enabled"):
             ClockEmulator.from_config({
@@ -121,7 +146,7 @@ class ClockEmulatorTest(unittest.TestCase):
                     "mapping_test": {"primary_timestamp_mode": "corrupted"},
                 },
             })
-        with self.assertRaisesRegex(ValueError, "must be truth or corrupted"):
+        with self.assertRaisesRegex(ValueError, "must be truth, corrupted, or device"):
             ClockEmulator.from_config({
                 "clock_emulation": {
                     "mapping_test": {"primary_timestamp_mode": "broken"},

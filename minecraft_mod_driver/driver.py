@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import grpc
 import json
 import math
 import os
@@ -18,12 +19,13 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from robonix_api import Err, Ok, Primitive
+from robonix_api import CapabilityTimeDescriptor, Err, Ok, Primitive
 from robonix_api.ros import RosBackend
 from minecraft_mod_driver.clock_emulation import ClockEmulator, ClockSample
 import chassis_mcp  # noqa: E402
 import minecraft_mcp  # noqa: E402
 import chassis_pb2  # noqa: E402
+import clock_pb2  # noqa: E402
 import std_msgs_pb2  # noqa: E402
 
 import builtin_interfaces_mcp  # noqa: E402
@@ -56,6 +58,9 @@ raw_depth_publisher = None
 raw_intrinsics_publisher = None
 raw_lidar_publisher = None
 clock_diagnostics_publisher = None
+latest_lidar_clock_sample: ClockSample | None = None
+latest_lidar_clock_update_monotonic_ns = 0
+lidar_clock_status_condition = threading.Condition()
 ground_truth_publisher = None
 odom_transform_broadcaster = None
 camera_transform_broadcaster = None
@@ -875,6 +880,28 @@ def configured_clock_emulation(
     return emulator, topics
 
 
+def configured_sensor_time_descriptors(
+    emulator: ClockEmulator,
+) -> tuple[CapabilityTimeDescriptor | None, CapabilityTimeDescriptor | None]:
+    """Describe the actual stamps carried by camera and LiDAR capabilities."""
+    if not emulator.device_primary_timestamps:
+        return None, None
+    return (
+        CapabilityTimeDescriptor(
+            domain_id="minecraft_realsense",
+            timestamp_semantics="exposure_midpoint",
+            is_hardware_timestamped=True,
+            pipeline_uncertainty_ns=20_000_000,
+        ),
+        CapabilityTimeDescriptor(
+            domain_id="minecraft_lidar_ptp",
+            timestamp_semantics="scan_start",
+            is_hardware_timestamped=True,
+            pipeline_uncertainty_ns=500_000,
+        ),
+    )
+
+
 def configured_lidar_ray_count(config: dict[str, Any]) -> int:
     """Read the full-revolution sample count within the Mod's safe bound."""
     raw = config.get("lidar_ray_count", os.environ.get(
@@ -1079,7 +1106,7 @@ def camera_stream_loop() -> None:
                 depth_view = depth_result.get("depthView") or {}
                 truth_ns: int | None = None
                 sequence_id: int | None = None
-                if clock_emulator.corrupt_primary_timestamps:
+                if clock_emulator.override_primary_timestamps:
                     truth_ns, sequence_id = capture_identity(depth_view)
                     primary_sample = clock_emulator.primary_sample(
                         "camera", truth_ns, sequence_id,
@@ -1224,7 +1251,7 @@ def lidar_stream_loop() -> None:
             scan = result.get("lidarScan") or {}
             truth_ns: int | None = None
             sequence_id: int | None = None
-            if clock_emulator.corrupt_primary_timestamps:
+            if clock_emulator.override_primary_timestamps:
                 truth_ns, sequence_id = capture_identity(scan)
                 primary_sample = clock_emulator.primary_sample(
                     "lidar", truth_ns, sequence_id,
@@ -1240,6 +1267,7 @@ def lidar_stream_loop() -> None:
                 if truth_ns is None or sequence_id is None:
                     truth_ns, sequence_id = capture_identity(scan)
                 sample = clock_emulator.lidar_ptp_sample(truth_ns, sequence_id)
+                update_lidar_clock_status(sample)
                 publish_lidar_scan(
                     result,
                     publisher=raw_lidar_publisher,
@@ -1249,6 +1277,97 @@ def lidar_stream_loop() -> None:
         except Exception as exc:  # noqa: BLE001
             log_stream_error("lidar", exc)
         lidar_stream_stop.wait(max(0.0, interval - (time.monotonic() - started)))
+
+
+def update_lidar_clock_status(sample: ClockSample) -> None:
+    """Store one hardware-facing PTP snapshot and wake stream consumers."""
+    global latest_lidar_clock_sample, latest_lidar_clock_update_monotonic_ns
+    with lidar_clock_status_condition:
+        latest_lidar_clock_sample = sample
+        latest_lidar_clock_update_monotonic_ns = time.monotonic_ns()
+        lidar_clock_status_condition.notify_all()
+
+
+def lidar_clock_status_message() -> "clock_pb2.ClockStatus | None":
+    """Build a current PTP status without exposing benchmark capture truth."""
+    with lidar_clock_status_condition:
+        sample = latest_lidar_clock_sample
+        updated_ns = latest_lidar_clock_update_monotonic_ns
+    if sample is None:
+        return None
+    state = {
+        "LOCKED": clock_pb2.ClockStatus.STATE_LOCKED,
+        "HOLDOVER": clock_pb2.ClockStatus.STATE_HOLDOVER,
+        "INITIALIZING": clock_pb2.ClockStatus.STATE_UNSYNCED,
+        "RELOCKING": clock_pb2.ClockStatus.STATE_UNSYNCED,
+    }.get(sample.state, clock_pb2.ClockStatus.STATE_FAULT)
+    uncertainty_ns = max(1, clock_emulator.lidar_ptp.locked_jitter_ns)
+    if sample.state in {"HOLDOVER", "RELOCKING"}:
+        uncertainty_ns = max(
+            uncertainty_ns,
+            abs(sample.injected_offset_ns - clock_emulator.lidar_ptp.locked_offset_ns),
+        )
+    return clock_pb2.ClockStatus(
+        domain_id="minecraft_lidar_ptp",
+        generation=1,
+        sequence_id=sample.sequence_id,
+        state=state,
+        grandmaster_id="02:00:00:ff:fe:00:00:42",
+        observed_domain_number=0,
+        master_offset_ns=sample.injected_offset_ns,
+        mean_path_delay_ns=0,
+        uncertainty_ns=uncertainty_ns,
+        sample_age_ns=max(0, time.monotonic_ns() - updated_ns),
+        source="minecraft_ptp_emulator",
+        reason=sample.state.lower(),
+    )
+
+
+@minecraft_mod.grpc("robonix/primitive/clock/get_status")
+def get_clock_status(request):
+    """Return the latest emulated LiDAR PTP status snapshot."""
+    if request.schema_version != 1:
+        return clock_pb2.GetClockStatus_Response(
+            ok=False,
+            error=clock_pb2.ClockStatusError(
+                code=clock_pb2.ClockStatusError.INVALID_STATUS,
+                message="schema_version must be 1",
+            ),
+        )
+    if request.domain_id != "minecraft_lidar_ptp":
+        return clock_pb2.GetClockStatus_Response(
+            ok=False,
+            error=clock_pb2.ClockStatusError(
+                code=clock_pb2.ClockStatusError.UNKNOWN_DOMAIN,
+                message=f"unknown clock domain: {request.domain_id}",
+            ),
+        )
+    status = lidar_clock_status_message()
+    if status is None:
+        return clock_pb2.GetClockStatus_Response(
+            ok=False,
+            error=clock_pb2.ClockStatusError(
+                code=clock_pb2.ClockStatusError.STATUS_UNAVAILABLE,
+                message="LiDAR has not produced a clock sample",
+            ),
+        )
+    return clock_pb2.GetClockStatus_Response(ok=True, status=status)
+
+
+@minecraft_mod.grpc("robonix/primitive/clock/watch_status")
+def watch_clock_status(request, context):
+    """Yield the current snapshot and each subsequent LiDAR PTP update."""
+    if request.schema_version != 1 or request.domain_id != "minecraft_lidar_ptp":
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "unsupported clock status request")
+    last_sequence_id = -1
+    while context.is_active():
+        status = lidar_clock_status_message()
+        if status is not None and status.sequence_id != last_sequence_id:
+            last_sequence_id = status.sequence_id
+            yield status
+            continue
+        with lidar_clock_status_condition:
+            lidar_clock_status_condition.wait(timeout=0.5)
 
 
 def start_camera_stream() -> None:
@@ -2275,6 +2394,7 @@ def initialize_camera(config: dict[str, Any]):
     global objects_publisher, lidar_publisher, clock_publisher, use_sim_time
     global raw_rgb_publisher, raw_depth_publisher, raw_intrinsics_publisher
     global raw_lidar_publisher, clock_diagnostics_publisher, clock_emulator
+    global latest_lidar_clock_sample, latest_lidar_clock_update_monotonic_ns
     global camera_transform_broadcaster
     global camera_frame_id, base_frame_id, lidar_frame_id, eye_height
     global rgb_topic, depth_topic, extrinsics_topic, intrinsics_topic
@@ -2309,6 +2429,9 @@ def initialize_camera(config: dict[str, Any]):
 
         use_sim_time = configured_use_sim_time(config)
         clock_emulator, emulation_topics = configured_clock_emulation(config)
+        with lidar_clock_status_condition:
+            latest_lidar_clock_sample = None
+            latest_lidar_clock_update_monotonic_ns = 0
         if clock_emulator.enabled and not use_sim_time:
             raise ValueError("clock emulation requires use_sim_time=true")
         (
@@ -2362,17 +2485,22 @@ def initialize_camera(config: dict[str, Any]):
         odom_frame_id = str(config.get("odom_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_ODOM_FRAME_ID", odom_frame_id,
         ))
+        camera_time_descriptor, lidar_time_descriptor = (
+            configured_sensor_time_descriptors(clock_emulator)
+        )
         rgb_publisher = minecraft_camera.create_publisher(
             "robonix/primitive/camera/rgb",
             topic=rgb_topic,
             msg_type=RosImage,
             qos="best_effort",
+            time_descriptor=camera_time_descriptor,
         )
         depth_publisher = minecraft_camera.create_publisher(
             "robonix/primitive/camera/depth",
             topic=depth_topic,
             msg_type=RosImage,
             qos="best_effort",
+            time_descriptor=camera_time_descriptor,
         )
         extrinsics_publisher = minecraft_camera.create_publisher(
             "robonix/primitive/camera/extrinsics",
@@ -2385,6 +2513,7 @@ def initialize_camera(config: dict[str, Any]):
             topic=intrinsics_topic,
             msg_type=CameraInfo,
             qos="latched",
+            time_descriptor=camera_time_descriptor,
         )
         objects_publisher = minecraft_perception.create_publisher(
             "robonix/primitive/perception/objects",
@@ -2397,6 +2526,7 @@ def initialize_camera(config: dict[str, Any]):
             topic=lidar_topic,
             msg_type=LaserScan,
             qos="best_effort",
+            time_descriptor=lidar_time_descriptor,
         )
         if clock_emulator.enabled:
             node = RosBackend.get().node

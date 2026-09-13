@@ -176,13 +176,16 @@ class ClockEmulator:
         primary_timestamp_mode = str(
             mapping_raw.get("primary_timestamp_mode", "truth")
         ).strip().lower()
-        if primary_timestamp_mode not in {"truth", "corrupted"}:
+        if primary_timestamp_mode not in {"truth", "corrupted", "device"}:
             raise ValueError(
                 "clock_emulation.mapping_test.primary_timestamp_mode "
-                "must be truth or corrupted"
+                "must be truth, corrupted, or device"
             )
-        if primary_timestamp_mode == "corrupted" and not enabled:
-            raise ValueError("corrupted primary timestamps require clock_emulation.enabled=true")
+        if primary_timestamp_mode != "truth" and not enabled:
+            raise ValueError(
+                f"{primary_timestamp_mode} primary timestamps require "
+                "clock_emulation.enabled=true"
+            )
         mapping_test = _MappingTestConfig(
             primary_timestamp_mode=primary_timestamp_mode,
             camera_offset_ns=_milliseconds_ns(
@@ -209,13 +212,23 @@ class ClockEmulator:
         """Whether established capability topics should carry bad common-domain stamps."""
         return self.mapping_test.primary_timestamp_mode == "corrupted"
 
+    @property
+    def override_primary_timestamps(self) -> bool:
+        """Whether capability topics should carry a selected non-truth clock."""
+        return self.mapping_test.primary_timestamp_mode != "truth"
+
+    @property
+    def device_primary_timestamps(self) -> bool:
+        """Whether capability topics should expose their emulated device domains."""
+        return self.mapping_test.primary_timestamp_mode == "device"
+
     def primary_sample(
         self,
         sensor: str,
         truth_ns: int,
         sequence_id: int,
     ) -> ClockSample:
-        """Create a truth or deliberately biased common-domain primary stamp."""
+        """Create the configured truth, biased, or native-device primary stamp."""
         if sensor not in {"camera", "lidar"}:
             raise ValueError("primary clock sensor must be camera or lidar")
         if isinstance(truth_ns, bool) or not isinstance(truth_ns, int) or truth_ns < 0:
@@ -226,6 +239,10 @@ class ClockEmulator:
             or sequence_id < 0
         ):
             raise ValueError("capture sequence must be a non-negative integer")
+        if self.device_primary_timestamps:
+            if sensor == "camera":
+                return self.realsense_sample(truth_ns, sequence_id)
+            return self.lidar_ptp_sample(truth_ns, sequence_id)
         offset_ns = (
             self.mapping_test.camera_offset_ns
             if sensor == "camera"

@@ -20,6 +20,8 @@ capabilities:
   - name: robonix/primitive/camera/extrinsics
   - name: robonix/primitive/camera/intrinsics
   - name: robonix/primitive/lidar/lidar
+  - name: robonix/primitive/clock/get_status
+  - name: robonix/primitive/clock/watch_status
   - name: robonix/primitive/chassis/move
   - name: robonix/primitive/chassis/odom
   - name: robonix/primitive/perception/objects
