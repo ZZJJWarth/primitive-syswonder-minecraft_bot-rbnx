@@ -1,0 +1,12 @@
+# Standalone camera device config; does not change a deployment or /clock.
+clock_emulation:
+  enabled: true
+  seed: 42
+  realsense:
+    time_base: host_monotonic
+    initial_uptime_sec: 5
+    drift_ppm: 50
+    jitter_ms: 1
+    reset_at_sec: null
+  mapping_test:
+    primary_timestamp_mode: truth

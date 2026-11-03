@@ -22,6 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
 
 /** Serves the confirmed loopback JSON-lines command interface. */
 public final class LocalCommandServer implements AutoCloseable {
@@ -139,7 +140,7 @@ public final class LocalCommandServer implements AutoCloseable {
         return response;
     }
 
-    /** Routes the confirmed command names while keeping game access on the client thread. */
+    /** Routes client commands and server-authoritative integrated controller commands. */
     private CompletableFuture<JsonObject> dispatch(JsonObject request) {
         String command = requiredString(request, "cmd");
         return switch (command) {
@@ -170,6 +171,12 @@ public final class LocalCommandServer implements AutoCloseable {
                     request.has("degrees") ? request.get("degrees").getAsDouble() : 0.0,
                     request.has("pitch_degrees") ? request.get("pitch_degrees").getAsDouble() : 0.0);
             case "stop" -> control.stop();
+            case "elevator_controller_get", "elevator_controller_set" -> ControllerClient.execute(
+                    requiredString(request, "dimension"),
+                    new BlockPos(requiredInt(request, "x"), requiredInt(request, "y"), requiredInt(request, "z")),
+                    command.equals("elevator_controller_set") ? requiredBoolean(request, "powered") : null,
+                    doorPositions(request), request.has("door_region")
+                            ? DoorRegion.parse(request.getAsJsonObject("door_region")) : null);
             case "inventory" -> actions.inventory();
             case "select_inventory_item" -> actions.selectInventoryItem(
                     requiredString(request, "item"));
@@ -219,6 +226,18 @@ public final class LocalCommandServer implements AutoCloseable {
             default -> CompletableFuture.failedFuture(
                     new IllegalArgumentException("unsupported command: " + command));
         };
+    }
+
+    private static java.util.List<BlockPos> doorPositions(JsonObject request) {
+        if (!request.has("doors")) return java.util.List.of();
+        var values = request.getAsJsonArray("doors");
+        if (values.size() > 16) throw new IllegalArgumentException("at most 16 door blocks may be observed");
+        var positions = new java.util.ArrayList<BlockPos>();
+        for (var value : values) {
+            var position = value.getAsJsonObject();
+            positions.add(new BlockPos(requiredInt(position, "x"), requiredInt(position, "y"), requiredInt(position, "z")));
+        }
+        return java.util.List.copyOf(positions);
     }
 
     /** Schedules observation creation on the Minecraft client thread. */
@@ -285,6 +304,7 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("simTimeNanos", frame.simTimeNanos());
         view.addProperty("captureSequence", frame.captureSequence());
         view.addProperty("timestampMs", frame.timestampMs());
+        addCaptureClock(view, frame.hostClock());
         view.add("image", image);
         JsonObject result = new JsonObject();
         result.add("renderedView", view);
@@ -312,6 +332,7 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("simTimeNanos", frame.simTimeNanos());
         view.addProperty("captureSequence", frame.captureSequence());
         view.addProperty("timestampMs", frame.timestampMs());
+        addCaptureClock(view, frame.hostClock());
         view.addProperty("verticalFovDeg", Minecraft.getInstance().options.fov().get());
         view.addProperty("unit", "metre");
         view.add("image", image);
@@ -363,6 +384,7 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("simTimeNanos", frame.simTimeNanos());
         view.addProperty("captureSequence", frame.captureSequence());
         view.addProperty("timestampMs", frame.timestampMs());
+        addCaptureClock(view, frame.hostClock());
         view.add("image", image);
         return view;
     }
@@ -383,10 +405,19 @@ public final class LocalCommandServer implements AutoCloseable {
         view.addProperty("simTimeNanos", frame.simTimeNanos());
         view.addProperty("captureSequence", frame.captureSequence());
         view.addProperty("timestampMs", frame.timestampMs());
+        addCaptureClock(view, frame.hostClock());
         view.addProperty("verticalFovDeg", Minecraft.getInstance().options.fov().get());
         view.addProperty("unit", "metre");
         view.add("image", image);
         return view;
+    }
+
+    /** Keep the shared capture marker separate from each encoder's wall timestamp. */
+    private static void addCaptureClock(JsonObject view, CaptureClock.Sample clock) {
+        view.addProperty("captureSessionId", clock.sessionId());
+        view.addProperty("captureElapsedNanos", clock.elapsedNanos());
+        view.addProperty("captureReferenceMs", clock.referenceMs());
+        view.addProperty("captureReferenceUncertaintyNanos", clock.uncertaintyNanos());
     }
 
     /** Reads a required string property from an incoming request. */

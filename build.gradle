@@ -12,6 +12,13 @@ base {
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
 
+sourceSets {
+    gameTest {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+
 minecraft {
     mappings channel: mapping_channel, version: mapping_version
     accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
@@ -20,8 +27,22 @@ minecraft {
         configureEach {
             workingDirectory project.file('run')
             property 'forge.logging.console.level', 'info'
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
         }
         client {}
+        gameTestServer {
+            workingDirectory project.file('build/gametest-run')
+            property 'forge.enabledGameTestNamespaces', mod_id
+            mods {
+                robonix_minecraft_tests {
+                    source sourceSets.gameTest
+                }
+            }
+        }
     }
 }
 

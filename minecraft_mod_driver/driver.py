@@ -292,6 +292,17 @@ def capture_identity(payload: dict[str, Any]) -> tuple[int, int]:
     return truth_ns, sequence_id
 
 
+def camera_clock_arguments(payload: dict[str, Any]) -> dict[str, Any]:
+    """Read capture elapsed metadata only when the camera uses the host clock."""
+    if clock_emulator.realsense.time_base == "game":
+        return {}
+    elapsed = payload.get("captureElapsedNanos")
+    session = payload.get("captureSessionId")
+    if type(elapsed) is not int or elapsed < 0 or not isinstance(session, str) or not session.strip():
+        raise ValueError("host camera clock requires Mod capture elapsed time and session identity")
+    return {"host_elapsed_ns": elapsed, "capture_session_id": session}
+
+
 def device_stamp(timestamp_ns: int) -> builtin_interfaces_mcp.Time:
     """Build the common stamp shape accepted by ROS and MCP conversion helpers."""
     sec, nanosec = split_timestamp_ns(timestamp_ns)
@@ -750,6 +761,9 @@ def publish_clock_diagnostic(sample: ClockSample, payload: dict[str, Any]) -> No
     diagnostic = sample.payload()
     diagnostic["tick_id"] = payload.get("tickId")
     diagnostic["partial_tick"] = payload.get("partialTick")
+    if sample.time_base == "host_monotonic":
+        for field in ("captureSessionId", "captureElapsedNanos", "captureReferenceMs", "captureReferenceUncertaintyNanos"):
+            diagnostic[field] = payload.get(field)
     clock_diagnostics_publisher.publish(String(
         data=json.dumps(diagnostic, separators=(",", ":"), sort_keys=True),
     ))
@@ -889,8 +903,8 @@ def configured_sensor_time_descriptors(
     return (
         CapabilityTimeDescriptor(
             domain_id="minecraft_realsense",
-            timestamp_semantics="exposure_midpoint",
-            is_hardware_timestamped=True,
+            timestamp_semantics="acquisition" if emulator.realsense.time_base == "host_monotonic" else "exposure_midpoint",
+            is_hardware_timestamped=emulator.realsense.time_base == "game",
             pipeline_uncertainty_ns=20_000_000,
         ),
         CapabilityTimeDescriptor(
@@ -1091,11 +1105,20 @@ def log_stream_error(stream: str, error: Exception) -> None:
 def camera_stream_loop() -> None:
     """Poll the Mod at the configured rate and publish each available camera stream."""
     interval = 1.0 / camera_stream_hz
+    last_capture: tuple[Any, Any] | None = None
     while not camera_stream_stop.is_set():
         started = time.monotonic()
         if use_sim_time:
             try:
                 depth_result = client.request({"cmd": "rgbd_snapshot"})
+                depth_view = depth_result.get("depthView") or {}
+                identity = (depth_view.get("captureSessionId"), depth_view.get("captureSequence"))
+                if clock_emulator.enabled:
+                    capture_identity(depth_view)
+                    if identity == last_capture:
+                        camera_stream_stop.wait(max(0.0, interval - (time.monotonic() - started)))
+                        continue
+                clock_arguments = camera_clock_arguments(depth_view)
                 rgb = rendered_view_to_rgb_image(depth_result)
                 depth = depth_view_to_image(depth_result)
                 if (
@@ -1110,6 +1133,7 @@ def camera_stream_loop() -> None:
                     truth_ns, sequence_id = capture_identity(depth_view)
                     primary_sample = clock_emulator.primary_sample(
                         "camera", truth_ns, sequence_id,
+                        **clock_arguments,
                     )
                     primary_stamp = device_stamp(primary_sample.device_timestamp_ns)
                     publish_ros_image(
@@ -1142,7 +1166,7 @@ def camera_stream_loop() -> None:
                 if clock_emulator.enabled:
                     if truth_ns is None or sequence_id is None:
                         truth_ns, sequence_id = capture_identity(depth_view)
-                    sample = clock_emulator.realsense_sample(truth_ns, sequence_id)
+                    sample = clock_emulator.realsense_sample(truth_ns, sequence_id, **clock_arguments)
                     raw_stamp = device_stamp(sample.device_timestamp_ns)
                     publish_ros_image(
                         raw_rgb_publisher,
@@ -1162,6 +1186,7 @@ def camera_stream_loop() -> None:
                         timestamp_ns=sample.device_timestamp_ns,
                     )
                     publish_clock_diagnostic(sample, depth_view)
+                last_capture = identity
             except Exception as exc:  # noqa: BLE001
                 log_stream_error("RGB-D", exc)
         else:

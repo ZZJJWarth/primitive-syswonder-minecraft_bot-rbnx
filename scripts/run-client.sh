@@ -48,22 +48,32 @@ export JAVA_HOME="$JAVA17_HOME"
 export PATH="$JAVA_HOME/bin:$PATH"
 export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 
-# Skip Minecraft's first-run accessibility screen so Quick Play can connect.
+# Keep an unattended client rendering when its virtual window has no focus.
+# Also skip the first-run accessibility screen so Quick Play can connect.
 mkdir -p "$PKG_ROOT/run"
 if [ -f "$MC_OPTIONS_FILE" ]; then
   awk '
-    BEGIN { found = 0 }
-    /^onboardAccessibility:/ {
-      if (!found) print "onboardAccessibility:false"
-      found = 1
-      next
+    BEGIN {
+      values["onboardAccessibility"] = "false"
+      values["pauseOnLostFocus"] = "false"
+      values["fullscreen"] = "false"
+    }
+    {
+      split($0, fields, ":")
+      key = fields[1]
+      if (key in values) {
+        if (!seen[key]++) print key ":" values[key]
+        next
+      }
     }
     { print }
-    END { if (!found) print "onboardAccessibility:false" }
+    END {
+      for (key in values) if (!seen[key]) print key ":" values[key]
+    }
   ' "$MC_OPTIONS_FILE" >"$MC_OPTIONS_FILE.tmp"
   mv "$MC_OPTIONS_FILE.tmp" "$MC_OPTIONS_FILE"
 else
-  printf '%s\n' 'onboardAccessibility:false' >"$MC_OPTIONS_FILE"
+  printf '%s\n' 'onboardAccessibility:false' 'pauseOnLostFocus:false' 'fullscreen:false' >"$MC_OPTIONS_FILE"
 fi
 
 echo "[minecraft-mod/client] starting $MC_USERNAME on $MC_HOST:$MC_PORT via $DISPLAY"

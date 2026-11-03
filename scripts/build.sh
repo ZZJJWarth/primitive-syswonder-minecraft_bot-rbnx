@@ -16,9 +16,19 @@ export JAVA_HOME="$JAVA17_HOME"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 VENV="$PKG/rbnx-build/codegen-venv"
+# A system Python upgrade can leave an executable venv with incompatible deps.
+if [ -f "$VENV/pyvenv.cfg" ] && ! python3 - "$VENV/pyvenv.cfg" <<'PY_VERSION'
+import pathlib, sys
+configured = next(line.split("=", 1)[1].strip() for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.startswith(("version =", "version_info =")))
+sys.exit(0 if configured.split(".")[:2] == [str(sys.version_info.major), str(sys.version_info.minor)] else 1)
+PY_VERSION
+then
+  echo "[build] Python version changed; preserving old venv and rebuilding"
+  mv "$VENV" "$VENV.backup.$(date +%Y%m%d%H%M%S)"
+fi
 if [ ! -x "$VENV/bin/python3" ]; then
   echo "[minecraft-mod/build] create codegen venv"
-  python3 -m venv "$VENV"
+  python3 -m venv --system-site-packages "$VENV"
 fi
 if ! "$VENV/bin/python3" -c 'import grpc_tools.protoc, yaml, numpy, PIL; from mcp.server.fastmcp import FastMCP' 2>/dev/null; then
   echo "[minecraft-mod/build] install Python runtime/codegen deps"

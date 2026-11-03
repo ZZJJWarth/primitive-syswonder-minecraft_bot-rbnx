@@ -1,0 +1,7 @@
+modLoader="javafml"
+loaderVersion="[49,)"
+license="MulanPSL-2.0"
+[[mods]]
+modId="robonix_minecraft_tests"
+version="0.1.0"
+displayName="Robonix elevator game tests"

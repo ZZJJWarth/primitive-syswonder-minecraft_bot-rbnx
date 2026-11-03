@@ -110,7 +110,7 @@ public final class DepthCapture implements AutoCloseable {
             buffer.get(depth);
             float farPlane = minecraft.gameRenderer.getDepthFar();
             converter.execute(() -> convert(
-                    depth, width, height, farPlane, token.renderFrameId(), sample,
+                    depth, width, height, farPlane, token.renderFrameId(), sample, token.hostClock(),
                     capturedWallMillis, capturedWallNanos));
         } catch (RuntimeException | OutOfMemoryError exception) {
             processing.set(false);
@@ -148,6 +148,7 @@ public final class DepthCapture implements AutoCloseable {
             float farPlane,
             long renderFrameId,
             SimulationClock.SampleContext sample,
+            CaptureClock.Sample hostClock,
             long capturedWallMillis,
             long capturedWallNanos
     ) {
@@ -173,7 +174,7 @@ public final class DepthCapture implements AutoCloseable {
                         renderFrameId,
                         sample.tickId(), sample.partialTick(), sample.simTimeNanos(),
                         sample.captureSequence(),
-                        capturedWallMillis, capturedWallNanos);
+                        capturedWallMillis, capturedWallNanos, hostClock);
                 latest.set(frame);
                 synchronized (this) {
                     history.addLast(frame);
@@ -236,6 +237,7 @@ public final class DepthCapture implements AutoCloseable {
             long simTimeNanos,
             long captureSequence,
             long timestampMs,
-            long capturedWallNanos
+            long capturedWallNanos,
+            CaptureClock.Sample hostClock
     ) {}
 }

@@ -2,42 +2,27 @@
 package com.robonix.minecraftmod;
 
 import com.mojang.logging.LogUtils;
+import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import org.slf4j.Logger;
 
-/** Starts the client-side camera and chassis primitive implementation. */
+/** Registers common game objects and starts controls only on the client. */
 @Mod(RobonixMinecraftMod.MOD_ID)
 public final class RobonixMinecraftMod {
     public static final String MOD_ID = "robonix_minecraft";
     public static final Logger LOGGER = LogUtils.getLogger();
 
-    /** Registers render/tick callbacks and starts the loopback command server. */
     public RobonixMinecraftMod() {
-        SimulationClock simulationClock = new SimulationClock();
-        RgbdFrameCoordinator rgbdCoordinator = new RgbdFrameCoordinator(simulationClock);
-        FrameCapture frameCapture = new FrameCapture(simulationClock, rgbdCoordinator);
-        DepthCapture depthCapture = new DepthCapture(rgbdCoordinator);
-        MinecraftControl control = new MinecraftControl();
-        MinecraftActions actions = new MinecraftActions(control);
-        MinecraftChatBridge chatBridge = new MinecraftChatBridge();
-        LocalCommandServer server = new LocalCommandServer(
-                simulationClock, frameCapture, depthCapture, control, actions, chatBridge);
-
-        MinecraftForge.EVENT_BUS.addListener(frameCapture::onRenderGui);
-        MinecraftForge.EVENT_BUS.addListener(frameCapture::onRenderScreen);
-        MinecraftForge.EVENT_BUS.addListener(depthCapture::onRenderLevel);
-        MinecraftForge.EVENT_BUS.addListener(control::onClientTick);
-        MinecraftForge.EVENT_BUS.addListener(control::onMovementInput);
-        MinecraftForge.EVENT_BUS.addListener(actions::onClientTick);
-        MinecraftForge.EVENT_BUS.addListener(chatBridge::onPlayerChat);
-        server.start();
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            server.close();
-            frameCapture.close();
-            depthCapture.close();
-            actions.close();
-        }, "robonix-minecraft-shutdown"));
+        var modBus = FMLJavaModLoadingContext.get().getModEventBus();
+        ElevatorControllerRegistry.BLOCKS.register(modBus);
+        ElevatorControllerRegistry.ITEMS.register(modBus);
+        ControllerNetwork.register();
+        var serverControl = new ServerControllerLifecycle();
+        MinecraftForge.EVENT_BUS.addListener(serverControl::started);
+        MinecraftForge.EVENT_BUS.addListener(serverControl::stopping);
+        DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> ClientBootstrap::start);
     }
 }

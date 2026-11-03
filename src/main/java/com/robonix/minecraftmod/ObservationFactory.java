@@ -27,6 +27,8 @@ import net.minecraft.world.phys.Vec3;
 /** Builds the structured observation consumed by the existing map service. */
 public final class ObservationFactory {
     private static final Set<String> SEMANTIC_BLOCK_WHITELIST = Set.of(
+            "robonix_minecraft:elevator_controller",
+            "minecraft:iron_door",
             "minecraft:chest",
             "minecraft:trapped_chest",
             "minecraft:crafting_table",

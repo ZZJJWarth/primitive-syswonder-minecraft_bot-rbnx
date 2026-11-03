@@ -9,13 +9,13 @@ CLIENT_PID=""
 PROVIDER_PID=""
 VIEWER_PID=""
 CHAT_PID=""
-if [ ! -x "$VENV/bin/python3" ]; then
+if [ ! -x "$VENV/bin/python3" ] || ! "$VENV/bin/python3" -c 'import grpc' >/dev/null 2>&1; then
   bash "$PKG_ROOT/scripts/build.sh"
 fi
 
 ROS_SETUP="${RBNX_MINECRAFT_ROS_SETUP:-}"
 if [ -z "$ROS_SETUP" ]; then
-  for candidate in /opt/ros/jazzy/setup.bash /opt/ros/humble/setup.bash; do
+  for candidate in "/opt/ros/${ROS_DISTRO:-lyrical}/setup.bash" /opt/ros/lyrical/setup.bash /opt/ros/jazzy/setup.bash /opt/ros/humble/setup.bash; do
     if [ -f "$candidate" ]; then
       ROS_SETUP="$candidate"
       break
@@ -52,9 +52,8 @@ stop_client_launcher() {
   ACTIVE_LAUNCH_PID=""
 }
 
-# Attempts NVIDIA when requested. Exit status 78 means rendering setup failed,
-# so only that status falls back to the inherited DISPLAY; Minecraft and
-# server failures propagate without starting a second client.
+# A requested off-screen display must stay off-screen even if setup fails.
+# Propagate the failure instead of opening a client on the developer's desktop.
 run_client() {
   local status
   ACTIVE_LAUNCH_PID=""
@@ -71,10 +70,10 @@ run_client() {
       status=$?
     fi
     ACTIVE_LAUNCH_PID=""
-    if [ "$status" -ne 78 ]; then
-      return "$status"
+    if [ "$status" -eq 78 ]; then
+      echo "[minecraft-mod] off-screen NVIDIA setup failed; check the display launcher output" >&2
     fi
-    echo "[minecraft-mod] NVIDIA rendering setup failed; falling back to DISPLAY=${DISPLAY:-<unset>}"
+    return "$status"
   fi
 
   ACTIVE_LAUNCH_IS_GROUP=1

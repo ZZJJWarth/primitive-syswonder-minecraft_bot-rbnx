@@ -1,6 +1,6 @@
 # Robonix Minecraft primitive
 
-This package connects a real Minecraft Java client to Robonix. A client-only
+This package connects a real Minecraft Java client to Robonix. A
 Forge Mod captures the rendered framebuffer, applies bounded player controls,
 and serves a loopback JSON-lines interface. The Python package exposes that
 client through existing camera, chassis, perception, and Minecraft primitive
@@ -11,7 +11,7 @@ contracts.
 - Minecraft Java 1.20.4
 - Forge 49.2.0
 - Eclipse Temurin OpenJDK 17.0.19+10
-- ROS 2 Jazzy
+- ROS 2 Lyrical on Ubuntu 26.04 (Python 3.14); Jazzy on Ubuntu 24.04 (Python 3.12)
 - Robonix development baseline
   `74b4ca0f7c0db3c237730321753501e12646c626`
 
@@ -29,11 +29,20 @@ The installed Java 21 can remain the system default. The build script uses
 JAVA_HOME="$HOME/.local/share/jdks/jdk-17.0.19+10" ./gradlew build
 ```
 
-Copy `build/libs/robonix_minecraft-0.1.0.jar` into the Forge 1.20.4 client's
+Copy `build/libs/robonix_minecraft-0.3.0.jar` into the Forge 1.20.4 client's
 `mods/` directory, then launch the client and join the target world or server.
-The server does not need to install this Mod.
+The camera and player controls run on the client. The optional elevator
+controller adds a custom block, which requires the Mod on the game server
+as well. Dedicated servers expose a separate loopback elevator interface at
+`127.0.0.1:25577`; elevator Robonix controls it directly without a game client.
+The legacy client-to-server Forge control path still requires operator level 2.
 Set the Forge launcher profile's Java executable to
 `$HOME/.local/share/jdks/jdk-17.0.19+10/bin/java`.
+
+The [elevator controller guide](docs/elevator-controller.md) describes the
+redstone block, local control script, two-floor command-block setup and
+headless transport tests.
+For a dedicated server, follow the [multiplayer deployment steps](docs/elevator-multiplayer.md).
 
 With `rbnx` installed and configured against a compatible Robonix source tree,
 validate and build the complete package:
@@ -54,19 +63,27 @@ RBNX_MINECRAFT_USE_NVIDIA=1 rbnx start -p . \
   --set ready_timeout_ms=120000
 ```
 
-The Mod listens only on `127.0.0.1:25576`. The package reuses a client already
+The client Mod listens on `127.0.0.1:25576`. The independent dedicated-server
+elevator interface listens on `127.0.0.1:25577`. The package reuses a client already
 listening there instead of launching another one. For a complete deployment,
 use `syswonder/robot-syswonder-minecraft_bot`, which owns the player URDF,
 Soma description, service selection, skill selection, and runtime parameters.
 
-Set `RBNX_MINECRAFT_USE_NVIDIA=1` to let boot start the client with NVIDIA
-Xorg. If NVIDIA rendering cannot be prepared, startup falls back to the
-inherited `DISPLAY`. Use `0` (the default) to use that display directly. Since
-boot is non-interactive, creating a new NVIDIA Xorg requires cached `sudo`
-authorization; otherwise startup falls back. For unattended startup, run a
-persistent NVIDIA Xorg service instead. An existing NVIDIA display requires no
-authorization. Boot also reuses a client already listening on the Mod command
-port.
+Set `RBNX_MINECRAFT_USE_NVIDIA=1` to render on a separate, rootless NVIDIA
+Xorg display (`:48` by default). No `sudo` or physical monitor is needed. The
+display runs on a dedicated seat, disables physical input/GPU auto-discovery,
+and uses `-novtswitch -sharevts` so the local desktop remains usable. This
+requires the native Xorg binary and NVIDIA Xorg/GLX modules, `nvidia-smi`,
+`xauth`, `mcookie`, `flock`, and `xdpyinfo`. Display setup failures stop startup.
+Use `0` (the default) to use the inherited `DISPLAY` directly.
+
+Boot creates and cleans up its own display automatically, or reuses an
+existing NVIDIA display. To keep a display running in a separate tmux window,
+run `./scripts/run-nvidia-display.sh` there; Ctrl-C stops it. Both `48` and `:48`
+are accepted for `MC_NVIDIA_DISPLAY`. Authentication uses
+`${XDG_RUNTIME_DIR:-$HOME/.cache/robonix}/minecraft-xauth-48`, independently of
+the desktop's Xauthority. Boot also reuses a client already listening on the
+Mod command port. See [off-screen rendering](docs/offscreen-rendering.md).
 
 The package starts a local framebuffer viewer at `http://127.0.0.1:8765/`. The page
 shows the latest Mod JPEG beside a fixed-scale depth visualization without
@@ -161,6 +178,13 @@ The provider also publishes `/minecraft/lidar/scan` through
 and head height. It is independent of the rendered depth buffer, so side and
 rear obstacles do not require turning the first-person camera.
 
+For a stationary Chronos Linux-reference test, the camera also supports
+`clock_emulation.realsense.time_base: host_monotonic`. A read-only collector
+emits device observations separately from independent score evidence; the
+existing game-time behavior remains the default. See
+[the camera test instructions](docs/chronos-camera-test.md) for building,
+synthetic verification and manually running the collector against Minecraft.
+
 For clock-synchronization benchmarks, the optional `clock_emulation` config
 adds raw device-clock shadows. The camera shadows emulate RealSense hardware
 uptime; the LiDAR shadow emulates a PTP-disciplined clock with configurable
@@ -210,8 +234,9 @@ the `minecraft_realsense` time descriptor, while LaserScan carries
 `robonix/primitive/clock/get_status` and
 `robonix/primitive/clock/watch_status`; these expose the emulated LiDAR servo
 state, Grandmaster identity, measured offset, and uncertainty without exposing
-Minecraft capture truth. Chronos can therefore discover and gate the PTP
-domain through the same hardware-facing interface used by a real provider.
+Minecraft capture truth. The current Chronos runtime does not automatically consume this status or
+supervise PTP. The simulated Grandmaster uses game time; a `LOCKED` status does
+not establish synchronization to Chronos's Linux reference.
 
 The separate benchmark-shadow topics remain available at
 `/minecraft/time_sync/raw/camera/{rgb,depth,camera_info}` and
@@ -358,7 +383,8 @@ that process itself. Only one wrapper may use a display at a time. Set
 
 ## Configuration
 
-- `RBNX_MINECRAFT_MOD_PORT`: loopback command port, default `25576`.
+- `RBNX_MINECRAFT_MOD_PORT`: client loopback command port, default `25576`.
+- `RBNX_MINECRAFT_ELEVATOR_PORT`: dedicated-server elevator port, default `25577`; set on the server process, `0` disables it.
 - `RBNX_MINECRAFT_CHAT_ENABLED`: start the server-chat frontend, default `1`.
 - `RBNX_MINECRAFT_CHAT_PREFIX`: addressed-message prefix, default `@bot`.
 - `RBNX_MINECRAFT_CHAT_ALLOWED_PLAYERS`: optional comma-separated UUID/name
@@ -368,7 +394,7 @@ that process itself. Only one wrapper may use a display at a time. Set
 - `ROBONIX_LIAISON_ENDPOINT`: Liaison gRPC endpoint, default
   `127.0.0.1:50081`.
 - `RBNX_MINECRAFT_ROS_SETUP`: ROS 2 `setup.bash`; defaults to an installed
-  Jazzy or Humble setup.
+  Lyrical, Jazzy, or Humble setup (prefers `ROS_DISTRO` when set).
 - `RBNX_MINECRAFT_CAMERA_STREAM_HZ`: RGB/depth publication rate, default `5`;
   valid range `0.1` through `60`.
 - `RBNX_MINECRAFT_ODOM_HZ`: odometry publication rate, default `10`; valid

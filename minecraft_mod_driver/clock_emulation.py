@@ -23,6 +23,9 @@ class ClockSample:
     device_timestamp_ns: int
     injected_offset_ns: int
     drift_ppm: float
+    time_base: str = "game"
+    device_generation: int = 1
+    capture_session_id: str | None = None
 
     def payload(self) -> dict[str, Any]:
         """Return a JSON-ready diagnostic payload."""
@@ -35,6 +38,7 @@ class _RealSenseConfig:
     drift_ppm: float
     jitter_ns: int
     reset_at_ns: int | None
+    time_base: str
 
 
 @dataclass(frozen=True)
@@ -60,9 +64,9 @@ class _MappingTestConfig:
 class ClockEmulator:
     """Map Minecraft truth into reproducible device-clock domains.
 
-    The first observed truth stamp is the scenario origin. LiDAR PTP remains
-    in the Minecraft/Grandmaster domain, while the RealSense clock reports
-    device uptime and can reset independently.
+    The first game truth stamp is the game/PTP scenario origin. The camera
+    defaults to that scale, or uses the shared Mod host elapsed marker when
+    explicitly configured. Linux wall-time evidence never drives device uptime.
     """
 
     def __init__(
@@ -81,6 +85,10 @@ class ClockEmulator:
         self.mapping_test = mapping_test
         self._origin_truth_ns: int | None = None
         self._lock = threading.Lock()
+        self._camera_session: str | None = None
+        self._camera_generation = 0
+        self._camera_reset = False
+        self._retired_camera_sessions: set[str] = set()
 
     @classmethod
     def from_config(cls, provider_config: dict[str, Any]) -> "ClockEmulator":
@@ -94,6 +102,9 @@ class ClockEmulator:
         rs_raw = raw.get("realsense") or {}
         if not isinstance(rs_raw, dict):
             raise ValueError("clock_emulation.realsense must be a mapping")
+        time_base = rs_raw.get("time_base", "game")
+        if not isinstance(time_base, str) or time_base not in {"game", "host_monotonic"}:
+            raise ValueError("clock_emulation.realsense.time_base must be game or host_monotonic")
         realsense = _RealSenseConfig(
             initial_uptime_ns=_seconds_ns(
                 rs_raw.get("initial_uptime_sec", 5.0),
@@ -113,6 +124,7 @@ class ClockEmulator:
                 rs_raw.get("reset_at_sec"),
                 "clock_emulation.realsense.reset_at_sec",
             ),
+            time_base=time_base,
         )
 
         ptp_raw = raw.get("lidar_ptp") or {}
@@ -227,6 +239,9 @@ class ClockEmulator:
         sensor: str,
         truth_ns: int,
         sequence_id: int,
+        *,
+        host_elapsed_ns: int | None = None,
+        capture_session_id: str | None = None,
     ) -> ClockSample:
         """Create the configured truth, biased, or native-device primary stamp."""
         if sensor not in {"camera", "lidar"}:
@@ -241,7 +256,10 @@ class ClockEmulator:
             raise ValueError("capture sequence must be a non-negative integer")
         if self.device_primary_timestamps:
             if sensor == "camera":
-                return self.realsense_sample(truth_ns, sequence_id)
+                return self.realsense_sample(
+                    truth_ns, sequence_id, host_elapsed_ns=host_elapsed_ns,
+                    capture_session_id=capture_session_id,
+                )
             return self.lidar_ptp_sample(truth_ns, sequence_id)
         offset_ns = (
             self.mapping_test.camera_offset_ns
@@ -263,10 +281,45 @@ class ClockEmulator:
             drift_ppm=0.0,
         )
 
-    def realsense_sample(self, truth_ns: int, sequence_id: int) -> ClockSample:
-        """Return a RealSense-style hardware-uptime timestamp."""
-        elapsed_ns = self._elapsed(truth_ns)
+    def realsense_sample(
+        self, truth_ns: int, sequence_id: int, *,
+        host_elapsed_ns: int | None = None,
+        capture_session_id: str | None = None,
+    ) -> ClockSample:
+        """Generate device uptime; host mode never uses game truth to advance time.
+
+        Host elapsed time must come from the shared Mod capture marker, not
+        driver receive time. Session changes and the configured reset each
+        advance device identity. Truth is retained only for diagnostics.
+        """
         config = self.realsense
+        if type(truth_ns) is not int or truth_ns < 0 or type(sequence_id) is not int or sequence_id < 0:
+            raise ValueError("capture truth and sequence must be non-negative integers")
+        generation = 1
+        if config.time_base == "host_monotonic":
+            if type(host_elapsed_ns) is not int or host_elapsed_ns < 0:
+                raise ValueError("host_monotonic requires non-negative captureElapsedNanos")
+            if not isinstance(capture_session_id, str) or not capture_session_id.strip():
+                raise ValueError("host_monotonic requires captureSessionId")
+            with self._lock:
+                if capture_session_id in self._retired_camera_sessions:
+                    raise ValueError("stale capture session")
+                if capture_session_id != self._camera_session:
+                    if self._camera_session is not None:
+                        self._retired_camera_sessions.add(self._camera_session)
+                    self._camera_session = capture_session_id
+                    self._camera_generation += 1
+                    self._camera_reset = False
+                elapsed_ns = host_elapsed_ns
+                reset = config.reset_at_ns is not None and elapsed_ns >= config.reset_at_ns
+                if reset and not self._camera_reset:
+                    self._camera_generation += 1
+                    self._camera_reset = True
+                if self._camera_reset and not reset:
+                    raise ValueError("capture predates device reset")
+                generation = self._camera_generation
+        else:
+            elapsed_ns = self._elapsed(truth_ns)
         if config.reset_at_ns is not None and elapsed_ns >= config.reset_at_ns:
             uptime_base_ns = elapsed_ns - config.reset_at_ns
             state = "RESET"
@@ -282,8 +335,11 @@ class ClockEmulator:
             sequence_id=sequence_id,
             capture_truth_ns=truth_ns,
             device_timestamp_ns=device_ns,
-            injected_offset_ns=device_ns - truth_ns,
+            injected_offset_ns=device_ns - (elapsed_ns if config.time_base == "host_monotonic" else truth_ns),
             drift_ppm=config.drift_ppm,
+            time_base=config.time_base,
+            device_generation=generation,
+            capture_session_id=capture_session_id if config.time_base == "host_monotonic" else None,
         )
 
     def lidar_ptp_sample(self, truth_ns: int, sequence_id: int) -> ClockSample:

@@ -81,11 +81,13 @@ public final class FrameCapture implements AutoCloseable {
                     ? simulationClock.capture(minecraft, minecraft.getPartialTick())
                     : token.sample();
             long renderFrameId = token == null ? 0L : token.renderFrameId();
+            CaptureClock.Sample hostClock = token == null
+                    ? rgbdCoordinator.captureHostClock() : token.hostClock();
             long capturedWallMillis = System.currentTimeMillis();
             image = Screenshot.takeScreenshot(minecraft.getMainRenderTarget());
             NativeImage ownedImage = image;
             encoder.execute(() -> encode(
-                    ownedImage, renderFrameId, sample, capturedWallMillis, now));
+                    ownedImage, renderFrameId, sample, hostClock, capturedWallMillis, now));
         } catch (RuntimeException exception) {
             if (image != null) {
                 image.close();
@@ -118,6 +120,7 @@ public final class FrameCapture implements AutoCloseable {
             NativeImage image,
             long renderFrameId,
             SimulationClock.SampleContext sample,
+            CaptureClock.Sample hostClock,
             long capturedWallMillis,
             long capturedWallNanos
     ) {
@@ -127,7 +130,7 @@ public final class FrameCapture implements AutoCloseable {
             Frame frame = new Frame(data, buffered.getWidth(), buffered.getHeight(),
                     renderFrameId,
                     sample.tickId(), sample.partialTick(), sample.simTimeNanos(),
-                    sample.captureSequence(), capturedWallMillis, capturedWallNanos);
+                    sample.captureSequence(), capturedWallMillis, capturedWallNanos, hostClock);
             latest.set(frame);
             synchronized (this) {
                 history.addLast(frame);
@@ -227,6 +230,7 @@ public final class FrameCapture implements AutoCloseable {
             long simTimeNanos,
             long captureSequence,
             long timestampMs,
-            long capturedWallNanos
+            long capturedWallNanos,
+            CaptureClock.Sample hostClock
     ) {}
 }
