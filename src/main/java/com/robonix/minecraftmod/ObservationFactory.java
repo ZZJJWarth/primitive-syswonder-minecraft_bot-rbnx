@@ -39,6 +39,7 @@ public final class ObservationFactory {
             "minecraft:zombie",
             "minecraft:player");
     private static final Map<String, DiscoveredBlock> DISCOVERED_BLOCKS = new LinkedHashMap<>();
+    private static final int MAX_DISCOVERED_BLOCKS = 512;
     private static ClientLevel discoveredLevel;
 
     private ObservationFactory() {}
@@ -122,11 +123,41 @@ public final class ObservationFactory {
     }
 
     /** Returns true when the first collidable block on the eye ray is the candidate. */
-    private static boolean isVisible(ClientLevel level, LocalPlayer player, BlockPos position) {
+    static boolean isVisible(ClientLevel level, LocalPlayer player, BlockPos position) {
         Vec3 target = Vec3.atCenterOf(position);
         BlockHitResult hit = level.clip(new ClipContext(
                 player.getEyePosition(), target, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
         return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(position);
+    }
+
+    /**
+     * Registers one line-of-sight visible whitelisted block in the persistent
+     * discovery snapshot consumed by the normal observation publisher.
+     */
+    static boolean rememberVisibleBlock(
+            ClientLevel level,
+            LocalPlayer player,
+            String dimension,
+            BlockPos position,
+            String label
+    ) {
+        if (!SEMANTIC_BLOCK_WHITELIST.contains(label)
+                || !isVisible(level, player, position)) {
+            return false;
+        }
+        if (discoveredLevel != level) {
+            DISCOVERED_BLOCKS.clear();
+            discoveredLevel = level;
+        }
+        String id = blockId(dimension, position);
+        DISCOVERED_BLOCKS.put(id, new DiscoveredBlock(
+                id, label, position.immutable(), Instant.now().toString()));
+        while (DISCOVERED_BLOCKS.size() > MAX_DISCOVERED_BLOCKS) {
+            var iterator = DISCOVERED_BLOCKS.values().iterator();
+            iterator.next();
+            iterator.remove();
+        }
+        return true;
     }
 
     /** Returns visible live semantic entities with stable UUID identity and geometry. */
@@ -172,7 +203,7 @@ public final class ObservationFactory {
     }
 
     /** Builds a stable identifier from the dimension and integer block coordinates. */
-    private static String blockId(String dimension, BlockPos position) {
+    static String blockId(String dimension, BlockPos position) {
         return dimension + "@" + position.getX() + "," + position.getY() + "," + position.getZ();
     }
 

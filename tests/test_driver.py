@@ -7,6 +7,7 @@ import json
 import math
 import os
 import socket
+import struct
 import sys
 import threading
 import tomllib
@@ -31,7 +32,9 @@ from minecraft_mod_driver.driver import (
     configured_frequency,
     configured_lidar_range,
     configured_lidar_ray_count,
+    configured_lidar_rings,
     configured_route_inspection,
+    configured_search_area,
     configured_sensor_time_descriptors,
     configured_use_sim_time,
     capture_identity,
@@ -39,6 +42,7 @@ from minecraft_mod_driver.driver import (
     execute_move_command,
     observation_pose,
     observation_timestamp,
+    lidar_ring_entries,
     lidar_scan_values,
     quaternion_from_yaw_pitch,
     rendered_view_to_rgb_image,
@@ -64,6 +68,30 @@ def semantic_entity_target(
     with driver.semantic_blocks_lock:
         driver.semantic_entity_targets[object_id] = (entity_uuid, label)
     return object_id
+
+
+def _search_result(**overrides) -> dict:
+    """Build one protocol-valid Mod area-search result."""
+    result = {
+        "found": True,
+        "dimension": "minecraft:overworld",
+        "candidate_blocks": 100,
+        "scanned_blocks": 100,
+        "skipped_unloaded_chunks": 0,
+        "truncated": False,
+        "timed_out": False,
+        "detail": "found 1 line-of-sight visible target block",
+        "matches": [{
+            "label": "minecraft:chest",
+            "x": 4,
+            "y": 64,
+            "z": -7,
+            "distance_m": 3.5,
+            "registered": True,
+        }],
+    }
+    result.update(overrides)
+    return result
 
 
 class MinecraftModClientTest(unittest.TestCase):
@@ -270,6 +298,154 @@ class MinecraftModClientTest(unittest.TestCase):
             configured_lidar_ray_count({"lidar_ray_count": 8})
         with self.assertRaisesRegex(ValueError, "1 through 64"):
             configured_lidar_range({"lidar_range_max": float("inf")})
+
+    def test_lidar_rings_configuration_is_bounded(self) -> None:
+        """Validate named ring heights without changing the legacy scan path."""
+        self.assertEqual(configured_lidar_rings({}), ())
+        self.assertEqual(configured_lidar_rings({"lidar_rings": None}), ())
+        rings = configured_lidar_rings({
+            "lidar_rings": [
+                {"name": "low", "height_m": 0.6},
+                {"name": "high", "height_m": 1.5},
+            ],
+        })
+        self.assertEqual(rings, (
+            {"name": "low", "height_m": 0.6},
+            {"name": "high", "height_m": 1.5},
+        ))
+        with self.assertRaisesRegex(ValueError, "at most 4"):
+            configured_lidar_rings({
+                "lidar_rings": [
+                    {"name": f"r{i}", "height_m": 0.5} for i in range(5)
+                ],
+            })
+        with self.assertRaisesRegex(ValueError, "unique"):
+            configured_lidar_rings({
+                "lidar_rings": [
+                    {"name": "low", "height_m": 0.6},
+                    {"name": "low", "height_m": 1.2},
+                ],
+            })
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            configured_lidar_rings({"lidar_rings": [{"name": " ", "height_m": 0.6}]})
+        with self.assertRaisesRegex(ValueError, r"within \[0, 3\]"):
+            configured_lidar_rings({"lidar_rings": [{"name": "low", "height_m": 3.5}]})
+        with self.assertRaisesRegex(ValueError, "must be a number"):
+            configured_lidar_rings({"lidar_rings": [{"name": "low", "height_m": True}]})
+
+    def test_lidar_ring_entries_require_body_height(self) -> None:
+        """Reject ring responses without a finite body-relative z."""
+        ring = {
+            "name": "low",
+            "z": -1.02,
+            "timestampMs": 1_750_000_000_250,
+            "angleMin": 0.0,
+            "angleMax": 15 * math.pi / 16,
+            "angleIncrement": math.pi / 16,
+            "rangeMin": 0.05,
+            "rangeMax": 32.0,
+            "ranges": [None] * 16,
+        }
+        entries = lidar_ring_entries({"lidarRings": [ring]})
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["name"], "low")
+        self.assertEqual(entries[0]["z"], -1.02)
+        self.assertTrue(math.isinf(entries[0]["values"]["ranges"][0]))
+        with self.assertRaisesRegex(ValueError, "missing lidarRings"):
+            lidar_ring_entries({"lidarScan": ring})
+        without_z = {key: value for key, value in ring.items() if key != "z"}
+        with self.assertRaisesRegex(ValueError, "missing z"):
+            lidar_ring_entries({"lidarRings": [without_z]})
+        with self.assertRaisesRegex(ValueError, "z must be finite"):
+            lidar_ring_entries({"lidarRings": [{**ring, "z": float("nan")}]})
+
+    def test_publish_lidar_rings_packs_body_relative_points(self) -> None:
+        """Pack finite returns of every ring into one z-encoded point cloud."""
+        class FakePointField:
+            """Accept the field descriptor kwargs used by the publisher."""
+
+            FLOAT32 = 7
+
+            def __init__(self, **kwargs: object) -> None:
+                """Store descriptor values as message attributes."""
+                self.__dict__.update(kwargs)
+
+        class FakePointCloud2:
+            """Provide mutable sensor_msgs fields populated by the provider."""
+
+            def __init__(self) -> None:
+                """Initialize the ROS message fields needed by the helper."""
+                self.header = SimpleNamespace(
+                    stamp=SimpleNamespace(sec=0, nanosec=0),
+                    frame_id="",
+                )
+                self.height = 0
+                self.width = 0
+                self.fields: list[FakePointField] = []
+                self.is_bigendian = True
+                self.point_step = 0
+                self.row_step = 0
+                self.is_dense = True
+                self.data = b""
+
+        sensor_msgs = ModuleType("sensor_msgs")
+        sensor_msgs_msg = ModuleType("sensor_msgs.msg")
+        sensor_msgs_msg.PointCloud2 = FakePointCloud2
+        sensor_msgs_msg.PointField = FakePointField
+        sensor_msgs.msg = sensor_msgs_msg
+        publisher = SimpleNamespace(publish=Mock())
+        previous_publisher = driver.lidar_rings_publisher
+        driver.lidar_rings_publisher = publisher
+
+        def ring(name: str, z: float) -> dict:
+            """Build one 16-ray ring hitting 2 m at 0 and 45 degrees."""
+            ranges = [None] * 16
+            ranges[0] = 2.0
+            ranges[4] = 2.0
+            return {
+                "name": name,
+                "z": z,
+                "timestampMs": 1_750_000_000_250,
+                "angleMin": 0.0,
+                "angleMax": 15 * math.pi / 16,
+                "angleIncrement": math.pi / 16,
+                "rangeMin": 0.05,
+                "rangeMax": 32.0,
+                "ranges": ranges,
+            }
+
+        try:
+            with patch.dict(
+                sys.modules,
+                {"sensor_msgs": sensor_msgs, "sensor_msgs.msg": sensor_msgs_msg},
+            ):
+                driver.publish_lidar_rings({
+                    "lidarRings": [ring("low", -1.02), ring("high", -0.12)],
+                })
+        finally:
+            driver.lidar_rings_publisher = previous_publisher
+
+        message = publisher.publish.call_args.args[0]
+        self.assertEqual(message.header.frame_id, driver.lidar_frame_id)
+        self.assertEqual(
+            (message.header.stamp.sec, message.header.stamp.nanosec),
+            (1_750_000_000, 250_000_000),
+        )
+        self.assertEqual((message.height, message.width), (1, 4))
+        self.assertEqual([field.name for field in message.fields], ["x", "y", "z"])
+        self.assertEqual((message.point_step, message.row_step), (12, 48))
+        points = [
+            struct.unpack_from("<fff", message.data, offset)
+            for offset in range(0, len(message.data), 12)
+        ]
+        self.assertEqual(len(points), 4)
+        self.assertAlmostEqual(points[0][0], 2.0)
+        self.assertAlmostEqual(points[0][1], 0.0)
+        self.assertAlmostEqual(points[0][2], -1.02)
+        self.assertAlmostEqual(points[1][0], math.sqrt(2.0))
+        self.assertAlmostEqual(points[1][1], math.sqrt(2.0))
+        self.assertAlmostEqual(points[1][2], -1.02)
+        self.assertAlmostEqual(points[2][2], -0.12)
 
     def test_sim_time_configuration_is_explicit(self) -> None:
         """Do not accidentally enable the graph clock for arbitrary truthy values."""
@@ -1532,6 +1708,212 @@ class MinecraftModClientTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     configured_eye_height({"eye_height": value})
+
+    def test_search_area_configuration_is_system_owned_and_bounded(self) -> None:
+        """Load area-search budgets and defaults and reject unsafe values."""
+        self.assertEqual(configured_search_area({}), (2048, 262144, 64, 8.0, 32, 32.0))
+        self.assertEqual(configured_search_area({
+            "search_area_blocks_per_tick": 4096,
+            "search_area_max_blocks": 65536,
+            "search_area_los_per_tick": 32,
+            "search_area_default_timeout_s": 5.0,
+            "search_area_default_max_results": 16,
+            "search_area_default_max_distance_m": 16.0,
+        }), (4096, 65536, 32, 5.0, 16, 16.0))
+        invalid = (
+            {"search_area_blocks_per_tick": 255},
+            {"search_area_blocks_per_tick": 16385},
+            {"search_area_max_blocks": 0},
+            {"search_area_max_blocks": 1_048_577},
+            {"search_area_los_per_tick": True},
+            {"search_area_default_timeout_s": 15.5},
+            {"search_area_default_max_results": 65},
+            {"search_area_default_max_distance_m": 48.5},
+        )
+        for config in invalid:
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                configured_search_area(config)
+
+    def test_search_area_for_object_maps_visible_match_and_refreshes_scene(self) -> None:
+        """Forward defaults, prefix registered IDs, and refresh the observation once."""
+        message = driver.minecraft_mcp.SearchAreaForObject_Request(
+            points_xy=[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0],
+            vertical_radius=4,
+            target_labels=["minecraft:chest"],
+            max_distance_m=0.0,
+            timeout_s=0.0,
+            max_results=0,
+        )
+        observation = {
+            "semanticBlocks": [],
+            "nearbyEntities": [],
+            "timestamp": "2026-11-15T00:00:00Z",
+            "simTimeNanos": 1,
+            "captureSequence": 1,
+        }
+        with patch.object(
+            driver.client,
+            "request",
+            side_effect=[_search_result(), observation],
+        ) as request:
+            response = driver.search_area_for_object_mcp(message)
+        sent = request.call_args_list[0].args[0]
+        self.assertEqual(sent["cmd"], "search_area_for_object")
+        self.assertEqual(sent["points_xy"], [0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0])
+        self.assertEqual(sent["vertical_radius"], 4)
+        self.assertEqual(sent["target_labels"], ["minecraft:chest"])
+        self.assertEqual(sent["max_distance_m"], 32.0)
+        self.assertEqual(sent["timeout_s"], 8.0)
+        self.assertEqual(sent["max_results"], 32)
+        self.assertEqual(sent["blocks_per_tick"], driver.search_area_blocks_per_tick)
+        self.assertEqual(sent["max_blocks"], driver.search_area_max_blocks)
+        self.assertEqual(sent["los_per_tick"], driver.search_area_los_per_tick)
+        self.assertEqual(request.call_args_list[1].args[0], {"cmd": "observe"})
+        self.assertTrue(response.found)
+        self.assertFalse(response.timed_out)
+        self.assertEqual(response.dimension, "minecraft:overworld")
+        match = response.matches[0]
+        self.assertEqual(match.object_id, "minecraft_mod/minecraft:overworld@4,64,-7")
+        self.assertEqual((match.label, match.x, match.y, match.z), ("minecraft:chest", 4, 64, -7))
+        self.assertAlmostEqual(match.distance_m, 3.5)
+        self.assertTrue(match.registered)
+
+    def test_search_area_for_object_returns_unregistered_coordinates_only(self) -> None:
+        """Return native coordinates but no Scene ID for non-whitelisted labels."""
+        message = driver.minecraft_mcp.SearchAreaForObject_Request(
+            points_xy=[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0],
+            vertical_radius=0,
+            target_labels=["minecraft:dirt"],
+            max_distance_m=8.0,
+            timeout_s=2.0,
+            max_results=1,
+        )
+        result = _search_result(
+            truncated=True,
+            matches=[{
+                "label": "minecraft:dirt",
+                "x": 4,
+                "y": 64,
+                "z": -7,
+                "distance_m": 3.5,
+                "registered": False,
+            }],
+        )
+        with patch.object(driver.client, "request", return_value=result) as request:
+            response = driver.search_area_for_object_mcp(message)
+        self.assertFalse(response.matches[0].registered)
+        self.assertEqual(response.matches[0].object_id, "")
+        request.assert_called_once()
+
+    def test_search_area_for_object_keeps_matches_on_partial_timeout(self) -> None:
+        """Treat a timed-out scan with visible matches as a successful partial result."""
+        message = driver.minecraft_mcp.SearchAreaForObject_Request(
+            points_xy=[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0],
+            vertical_radius=4,
+            target_labels=["minecraft:chest"],
+        )
+        result = _search_result(
+            timed_out=True,
+            scanned_blocks=50,
+            detail="found 1 target block; search timed out before completing the area",
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            side_effect=[result, {"semanticBlocks": [], "nearbyEntities": []}],
+        ):
+            response = driver.search_area_for_object_mcp(message)
+        self.assertTrue(response.found)
+        self.assertTrue(response.timed_out)
+        self.assertFalse(response.truncated)
+        self.assertEqual(response.scanned_blocks, 50)
+        self.assertIn("timed out", response.detail)
+
+    def test_search_area_for_object_tolerates_observation_refresh_failure(self) -> None:
+        """Return verified matches even when the optional Scene refresh fails."""
+        message = driver.minecraft_mcp.SearchAreaForObject_Request(
+            points_xy=[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0],
+            vertical_radius=4,
+            target_labels=["minecraft:chest"],
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            side_effect=[_search_result(), RuntimeError("observe unavailable")],
+        ):
+            response = driver.search_area_for_object_mcp(message)
+        self.assertTrue(response.found)
+        self.assertEqual(len(response.matches), 1)
+        self.assertIn("observation refresh failed", response.detail)
+
+    def test_search_area_for_object_rejects_invalid_requests(self) -> None:
+        """Validate the polygon and every bounded request field before the Mod call."""
+        base = {
+            "points_xy": [0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0],
+            "vertical_radius": 4,
+            "target_labels": ["minecraft:chest"],
+            "max_distance_m": 0.0,
+            "timeout_s": 0.0,
+            "max_results": 0,
+        }
+        invalid = (
+            {"points_xy": [0.0, 0.0, 1.0, 0.0, 1.0]},
+            {"points_xy": [0.0, 0.0, 1.0, 0.0]},
+            {"points_xy": [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0] * 33},
+            {"points_xy": [0.0, 0.0, 1.0, float("nan"), 1.0, 1.0]},
+            {"points_xy": [0.0, 0.0, 1.0, 0.0, 2.0, 0.0]},
+            {"vertical_radius": -1},
+            {"vertical_radius": 17},
+            {"target_labels": []},
+            {"target_labels": ["minecraft:chest"] * 9},
+            {"target_labels": ["Minecraft:Chest"]},
+            {"max_distance_m": 0.5},
+            {"max_distance_m": 49.0},
+            {"timeout_s": 15.5},
+            {"max_results": 65},
+        )
+        for override in invalid:
+            message = driver.minecraft_mcp.SearchAreaForObject_Request(**{**base, **override})
+            with self.subTest(override=override), patch.object(driver.client, "request") as request:
+                with self.assertRaises(ValueError):
+                    driver.search_area_for_object_mcp(message)
+                request.assert_not_called()
+
+    def test_search_area_for_object_rejects_malformed_mod_response(self) -> None:
+        """Fail closed on impossible counts, labels, and registration flags."""
+        message = driver.minecraft_mcp.SearchAreaForObject_Request(
+            points_xy=[0.0, 0.0, 10.0, 0.0, 10.0, 10.0, 0.0, 10.0],
+            vertical_radius=4,
+            target_labels=["minecraft:chest"],
+        )
+        valid_match = {
+            "label": "minecraft:chest",
+            "x": 4,
+            "y": 64,
+            "z": -7,
+            "distance_m": 3.5,
+            "registered": True,
+        }
+        results = (
+            _search_result(found="yes"),
+            _search_result(candidate_blocks=-1),
+            _search_result(scanned_blocks=101),
+            _search_result(skipped_unloaded_chunks=101),
+            _search_result(truncated=True),
+            _search_result(timed_out=True, truncated=True),
+            _search_result(matches=[valid_match] * 33),
+            _search_result(matches=[{**valid_match, "distance_m": float("nan")}]),
+            _search_result(matches=[{**valid_match, "label": "minecraft:dirt"}]),
+            _search_result(matches=[{**valid_match, "registered": False}]),
+            _search_result(matches=[{**valid_match, "x": 1.5}]),
+        )
+        for result in results:
+            with self.subTest(result=result), patch.object(
+                driver.client, "request", return_value=result,
+            ) as request:
+                with self.assertRaises(RuntimeError):
+                    driver.search_area_for_object_mcp(message)
+                self.assertEqual(request.call_count, 1)
 
     def test_route_inspection_configuration_is_system_owned_and_bounded(self) -> None:
         """Load corridor geometry from provider config and reject unsafe values."""

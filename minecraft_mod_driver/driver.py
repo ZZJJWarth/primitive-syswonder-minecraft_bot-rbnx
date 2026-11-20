@@ -10,6 +10,7 @@ import math
 import os
 import re
 import socket
+import struct
 import threading
 import time
 import uuid
@@ -52,6 +53,9 @@ intrinsics_publisher = None
 odom_publisher = None
 objects_publisher = None
 lidar_publisher = None
+lidar_rings_publisher = None
+lidar_low_publisher = None
+lidar_high_publisher = None
 clock_publisher = None
 raw_rgb_publisher = None
 raw_depth_publisher = None
@@ -123,6 +127,10 @@ lidar_range_max = 16.0
 camera_frame_id = "minecraft_camera_optical_frame"
 base_frame_id = "minecraft_view_base"
 lidar_frame_id = base_frame_id
+lidar_rings: tuple[dict[str, object], ...] = ()
+lidar_rings_topic = "/minecraft/lidar/points"
+lidar_low_topic = "/minecraft/lidar/scan_low"
+lidar_high_topic = "/minecraft/lidar/scan_high"
 odom_frame_id = "minecraft_odom"
 eye_height = 1.62
 rgb_topic = "/minecraft/camera/rgb"
@@ -140,6 +148,12 @@ cmd_vel_max_angular = 1.0
 route_inspection_half_width_m = 0.8
 route_inspection_sample_spacing_m = 0.25
 route_inspection_max_blocks = 64
+search_area_blocks_per_tick = 2048
+search_area_max_blocks = 262144
+search_area_los_per_tick = 64
+search_area_default_timeout_s = 8.0
+search_area_default_max_results = 32
+search_area_default_max_distance_m = 32.0
 use_sim_time = False
 ground_truth_topic = "/minecraft/ground_truth/pose"
 clock_emulator = ClockEmulator.from_config({})
@@ -480,6 +494,103 @@ def publish_lidar_scan(
     message.range_max = values["range_max"]
     message.ranges = values["ranges"]
     target_publisher.publish(message)
+
+
+def lidar_ring_entries(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate per-ring Mod scans and return name/z/values/raw records."""
+    raw_rings = result.get("lidarRings")
+    if not isinstance(raw_rings, list) or not raw_rings:
+        raise ValueError("ring scan response is missing lidarRings")
+    entries: list[dict[str, Any]] = []
+    for raw in raw_rings:
+        if not isinstance(raw, dict):
+            raise ValueError("each lidar ring entry must be an object")
+        values = lidar_scan_values({"lidarScan": raw})
+        z = raw.get("z")
+        if z is None:
+            raise ValueError("lidar ring entry is missing z")
+        height = float(z)
+        if not math.isfinite(height):
+            raise ValueError("lidar ring z must be finite")
+        entries.append({
+            "name": str(raw.get("name") or ""),
+            "z": height,
+            "values": values,
+            "raw": raw,
+        })
+    return entries
+
+
+def publish_lidar_rings(
+    result: dict[str, Any],
+    *,
+    timestamp_ns: int | None = None,
+) -> None:
+    """Publish all configured rings as one body-relative PointCloud2."""
+    target_publisher = lidar_rings_publisher
+    if target_publisher is None:
+        raise RuntimeError("lidar rings publisher is not initialized")
+    from sensor_msgs.msg import PointCloud2, PointField  # type: ignore
+
+    entries = lidar_ring_entries(result)
+    data = bytearray()
+    for entry in entries:
+        values = entry["values"]
+        z = float(entry["z"])
+        for index, distance in enumerate(values["ranges"]):
+            if not math.isfinite(distance):
+                continue
+            angle = values["angle_min"] + index * values["angle_increment"]
+            data.extend(struct.pack(
+                "<fff",
+                distance * math.cos(angle),
+                distance * math.sin(angle),
+                z,
+            ))
+    message = PointCloud2()
+    if timestamp_ns is None:
+        message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp(
+            entries[0]["values"]["timestamp"],
+        )
+    else:
+        message.header.stamp.sec, message.header.stamp.nanosec = split_timestamp_ns(timestamp_ns)
+    message.header.frame_id = lidar_frame_id
+    message.height = 1
+    message.width = len(data) // 12
+    message.fields = [
+        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+    ]
+    message.is_bigendian = False
+    message.point_step = 12
+    message.row_step = message.point_step * message.width
+    message.is_dense = False
+    message.data = bytes(data)
+    target_publisher.publish(message)
+
+
+def publish_lidar_ring_scans(
+    result: dict[str, Any],
+    *,
+    timestamp_ns: int | None = None,
+) -> None:
+    """Publish optional low/high LaserScan views for debugging and compatibility."""
+    for entry in lidar_ring_entries(result):
+        name = entry["name"]
+        if name == "low":
+            publisher = lidar_low_publisher
+        elif name == "high":
+            publisher = lidar_high_publisher
+        else:
+            continue
+        if publisher is None:
+            continue
+        publish_lidar_scan(
+            {"lidarScan": entry["raw"]},
+            publisher=publisher,
+            timestamp_ns=timestamp_ns,
+        )
 
 
 def publish_ros_image(
@@ -930,6 +1041,37 @@ def configured_lidar_ray_count(config: dict[str, Any]) -> int:
     return value
 
 
+def configured_lidar_rings(config: dict[str, Any]) -> tuple[dict[str, object], ...]:
+    """Read optional named rings; an empty list keeps the legacy single scan."""
+    raw = config.get("lidar_rings", ())
+    if raw is None or raw == "":
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("lidar_rings must be a list of {name, height_m} objects")
+    if len(raw) > 4:
+        raise ValueError("lidar_rings accepts at most 4 rings")
+    rings: list[dict[str, object]] = []
+    names: set[str] = set()
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"lidar_rings[{index}] must be an object")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"lidar_rings[{index}].name must be non-empty")
+        if name in names:
+            raise ValueError(f"lidar_rings names must be unique ({name!r})")
+        if "height_m" not in item:
+            raise ValueError(f"lidar_rings[{index}].height_m is required")
+        if isinstance(item["height_m"], bool):
+            raise ValueError(f"lidar_rings[{index}].height_m must be a number")
+        height = float(item["height_m"])
+        if not math.isfinite(height) or not 0.0 <= height <= 3.0:
+            raise ValueError(f"lidar_rings[{index}].height_m must be within [0, 3]")
+        names.add(name)
+        rings.append({"name": name, "height_m": height})
+    return tuple(rings)
+
+
 def configured_lidar_range(config: dict[str, Any]) -> float:
     """Read the collision-ray range within loaded-world and map bounds."""
     value = float(config.get("lidar_range_max", os.environ.get(
@@ -967,6 +1109,45 @@ def configured_route_inspection(config: dict[str, Any]) -> tuple[float, float, i
     if max_blocks != float(raw_max_blocks) or not 1 <= max_blocks <= 256:
         raise ValueError("route_inspection_max_blocks must be an integer from 1 through 256")
     return half_width, sample_spacing, max_blocks
+
+
+def _configured_search_integer(
+    config: dict[str, Any], key: str, fallback: int, minimum: int, maximum: int,
+) -> int:
+    """Require one integral area-search budget inside its closed range."""
+    raw = config.get(key, fallback)
+    if isinstance(raw, bool):
+        raise ValueError(f"{key} must be an integer from {minimum} through {maximum}")
+    value = int(raw)
+    if value != float(raw) or not minimum <= value <= maximum:
+        raise ValueError(f"{key} must be an integer from {minimum} through {maximum}")
+    return value
+
+
+def _configured_search_number(
+    config: dict[str, Any], key: str, fallback: float, minimum: float, maximum: float,
+) -> float:
+    """Require one finite area-search default inside its closed range."""
+    value = float(config.get(key, fallback))
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError(f"{key} must be finite and from {minimum} through {maximum}")
+    return value
+
+
+def configured_search_area(
+    config: dict[str, Any],
+) -> tuple[int, int, int, float, int, float]:
+    """Validate the system-owned area-search budgets and caller defaults."""
+    return (
+        _configured_search_integer(config, "search_area_blocks_per_tick", 2048, 256, 16384),
+        _configured_search_integer(config, "search_area_max_blocks", 262144, 1, 1_048_576),
+        _configured_search_integer(config, "search_area_los_per_tick", 64, 8, 512),
+        _configured_search_number(config, "search_area_default_timeout_s", 8.0, 1.0, 15.0),
+        _configured_search_integer(config, "search_area_default_max_results", 32, 1, 64),
+        _configured_search_number(
+            config, "search_area_default_max_distance_m", 32.0, 1.0, 48.0,
+        ),
+    )
 
 
 def configured_cmd_vel_bridge(
@@ -1268,11 +1449,17 @@ def lidar_stream_loop() -> None:
     while not lidar_stream_stop.is_set():
         started = time.monotonic()
         try:
-            result = client.request({
-                "cmd": "lidar_scan",
+            request: dict[str, Any] = {
+                "cmd": "lidar_scan_rings" if lidar_rings else "lidar_scan",
                 "ray_count": lidar_ray_count,
                 "range_max": lidar_range_max,
-            })
+            }
+            if lidar_rings:
+                request["rings"] = [
+                    {"name": ring["name"], "height_m": ring["height_m"]}
+                    for ring in lidar_rings
+                ]
+            result = client.request(request)
             scan = result.get("lidarScan") or {}
             truth_ns: int | None = None
             sequence_id: int | None = None
@@ -1285,9 +1472,19 @@ def lidar_stream_loop() -> None:
                     result,
                     timestamp_ns=primary_sample.device_timestamp_ns,
                 )
+                if lidar_rings:
+                    publish_lidar_rings(
+                        result, timestamp_ns=primary_sample.device_timestamp_ns,
+                    )
+                    publish_lidar_ring_scans(
+                        result, timestamp_ns=primary_sample.device_timestamp_ns,
+                    )
                 publish_clock_diagnostic(primary_sample, scan)
             else:
                 publish_lidar_scan(result)
+                if lidar_rings:
+                    publish_lidar_rings(result)
+                    publish_lidar_ring_scans(result)
             if clock_emulator.enabled:
                 if truth_ns is None or sequence_id is None:
                     truth_ns, sequence_id = capture_identity(scan)
@@ -1538,6 +1735,16 @@ def stop_cmd_vel_bridge() -> bool:
 REGISTRY_NAME = re.compile(r"^[a-z0-9_.-]+:[a-z0-9_./-]+$")
 ACTION_REQUEST_TIMEOUT_SEC = 30.0
 BREAKABLE_BLOCKS = frozenset(("minecraft:dirt", "minecraft:crafting_table"))
+SEMANTIC_BLOCK_LABELS = frozenset((
+    "robonix_minecraft:elevator_controller",
+    "minecraft:iron_door",
+    "minecraft:chest",
+    "minecraft:trapped_chest",
+    "minecraft:crafting_table",
+    "minecraft:furnace",
+    "minecraft:cauldron",
+    "minecraft:water_cauldron",
+))
 # Recovery calls are planned in separate Pilot rounds.  Keep the opaque
 # inspection handle long enough for that round-trip (including history
 # compaction and model latency), while still expiring it promptly if a caller
@@ -1874,6 +2081,165 @@ def inspect_route_path_mcp(
                 if dirt_positions else "no dirt block occupies the footprint corridor"
             )
         ),
+    )
+
+
+def _search_area_polygon(points: Any) -> list[float]:
+    """Validate one flat minecraft_odom polygon and reject degenerate areas."""
+    try:
+        points_xy = [float(value) for value in points]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("points_xy must contain numeric coordinates") from exc
+    if len(points_xy) % 2 != 0 or not 6 <= len(points_xy) <= 128:
+        raise ValueError("points_xy must contain from 3 through 64 paired coordinates")
+    if not all(math.isfinite(value) for value in points_xy):
+        raise ValueError("points_xy coordinates must be finite")
+    if any(abs(value) > 30_000_000.0 for value in points_xy):
+        raise ValueError("points_xy coordinates must be finite world coordinates")
+    east = points_xy[0::2]
+    north = points_xy[1::2]
+    if not (max(east) > min(east) and max(north) > min(north)):
+        raise ValueError("points_xy must enclose a non-zero area")
+    twice_area = sum(
+        east[index] * north[(index + 1) % len(east)]
+        - east[(index + 1) % len(east)] * north[index]
+        for index in range(len(east))
+    )
+    if abs(twice_area) <= 1e-6:
+        raise ValueError("points_xy must enclose a non-zero area")
+    bounding_cells = (
+        (math.ceil(max(east)) - math.floor(min(east)) + 3.0)
+        * (math.ceil(max(north)) - math.floor(min(north)) + 3.0)
+    )
+    if bounding_cells > 1_000_000:
+        raise ValueError("search area bounding box is too large; split it into smaller regions")
+    return points_xy
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/search_area_for_object")
+def search_area_for_object_mcp(
+    req: minecraft_mcp.SearchAreaForObject_Request,
+) -> minecraft_mcp.SearchAreaForObject_Response:
+    """Search one known minecraft_odom area for line-of-sight visible blocks."""
+    points_xy = _search_area_polygon(req.points_xy)
+    vertical_radius = exact_int(req.vertical_radius, "vertical_radius", 0, 16)
+    raw_targets = [str(label) for label in req.target_labels]
+    if not 1 <= len(raw_targets) <= 8:
+        raise ValueError("target_labels must contain from 1 through 8 block registry names")
+    targets = list(dict.fromkeys(
+        registry_name(label, "target_labels") for label in raw_targets
+    ))
+    max_distance = float(req.max_distance_m)
+    if max_distance == 0.0:
+        max_distance = search_area_default_max_distance_m
+    elif not math.isfinite(max_distance) or not 1.0 <= max_distance <= 48.0:
+        raise ValueError("max_distance_m must be 0 (use default) or from 1 through 48")
+    timeout = float(req.timeout_s)
+    if timeout == 0.0:
+        timeout = search_area_default_timeout_s
+    elif not math.isfinite(timeout) or not 1.0 <= timeout <= 15.0:
+        raise ValueError("timeout_s must be 0 (use default) or from 1 through 15")
+    if isinstance(req.max_results, bool) or not isinstance(req.max_results, int) \
+            or not 0 <= req.max_results <= 64:
+        raise ValueError(
+            "max_results must be 0 (use default) or an integer from 1 through 64")
+    max_results = req.max_results or search_area_default_max_results
+
+    result = action_request({
+        "cmd": "search_area_for_object",
+        "points_xy": points_xy,
+        "vertical_radius": vertical_radius,
+        "target_labels": targets,
+        "max_distance_m": max_distance,
+        "timeout_s": timeout,
+        "max_results": max_results,
+        "blocks_per_tick": search_area_blocks_per_tick,
+        "max_blocks": search_area_max_blocks,
+        "los_per_tick": search_area_los_per_tick,
+    })
+    try:
+        dimension = registry_name(result.get("dimension"), "dimension")
+        candidate_blocks = exact_int(
+            result.get("candidate_blocks"), "candidate_blocks", 0, 4_294_967_295,
+        )
+        scanned_blocks = exact_int(
+            result.get("scanned_blocks"), "scanned_blocks", 0, 4_294_967_295,
+        )
+        skipped_chunks = exact_int(
+            result.get("skipped_unloaded_chunks"), "skipped_unloaded_chunks", 0, 4_294_967_295,
+        )
+        if scanned_blocks > candidate_blocks or skipped_chunks > candidate_blocks:
+            raise RuntimeError("Minecraft Mod returned inconsistent search counts")
+        truncated = result.get("truncated")
+        timed_out = result.get("timed_out")
+        if not isinstance(truncated, bool) or not isinstance(timed_out, bool):
+            raise RuntimeError("Minecraft Mod returned invalid search flags")
+        if truncated and timed_out:
+            raise RuntimeError("Minecraft Mod returned conflicting search flags")
+        raw_matches = result.get("matches")
+        if not isinstance(raw_matches, list):
+            raise RuntimeError("Minecraft Mod returned invalid search matches")
+        if len(raw_matches) > max_results:
+            raise RuntimeError("Minecraft Mod returned too many search matches")
+        if truncated != (len(raw_matches) == max_results):
+            raise RuntimeError("Minecraft Mod returned inconsistent truncation state")
+        target_set = set(targets)
+        matches = []
+        for raw in raw_matches:
+            if not isinstance(raw, dict):
+                raise RuntimeError("Minecraft Mod search match is not an object")
+            label = registry_name(raw.get("label"), "label")
+            if label not in target_set:
+                raise RuntimeError("Minecraft Mod returned an unrequested target label")
+            x = exact_int(raw.get("x"), "x", -30_000_000, 30_000_000)
+            y = exact_int(raw.get("y"), "y", -2048, 2048)
+            z = exact_int(raw.get("z"), "z", -30_000_000, 30_000_000)
+            distance = float(raw.get("distance_m"))
+            if not math.isfinite(distance) or not 0.0 <= distance <= max_distance:
+                raise RuntimeError("Minecraft Mod returned an invalid search distance")
+            registered = raw.get("registered")
+            if not isinstance(registered, bool):
+                raise RuntimeError("Minecraft Mod returned invalid search registration")
+            if registered != (label in SEMANTIC_BLOCK_LABELS):
+                raise RuntimeError("Minecraft Mod returned inconsistent search registration")
+            object_id = f"{minecraft_mod.id}/{dimension}@{x},{y},{z}" if registered else ""
+            matches.append(minecraft_mcp.SearchMatch(
+                object_id=object_id,
+                label=label,
+                x=x,
+                y=y,
+                z=z,
+                distance_m=distance,
+                registered=registered,
+            ))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid Minecraft Mod search response: {exc}") from exc
+    found = result.get("found")
+    if not isinstance(found, bool) or found != bool(matches):
+        raise RuntimeError("Minecraft Mod returned inconsistent search presence")
+    detail = result.get("detail")
+    if detail is not None and not isinstance(detail, str):
+        raise RuntimeError("Minecraft Mod returned invalid search detail")
+    detail = detail.strip() if isinstance(detail, str) and detail.strip() else (
+        f"found {len(matches)} line-of-sight visible target blocks"
+        if matches else "no line-of-sight visible target block was found"
+    )
+    if any(match.registered for match in matches):
+        try:
+            observation = client.request({"cmd": "observe"})
+            semantic_objects_payload(observation)
+        except Exception as exc:  # noqa: BLE001
+            detail += f"; observation refresh failed: {exc}"
+    return minecraft_mcp.SearchAreaForObject_Response(
+        found=found,
+        dimension=dimension,
+        candidate_blocks=candidate_blocks,
+        scanned_blocks=scanned_blocks,
+        skipped_unloaded_chunks=skipped_chunks,
+        truncated=truncated,
+        timed_out=timed_out,
+        detail=detail,
+        matches=matches,
     )
 
 
@@ -2417,6 +2783,8 @@ def initialize_camera(config: dict[str, Any]):
     """Initialize camera streams and the colocated chassis after Mod readiness."""
     global rgb_publisher, depth_publisher, extrinsics_publisher, intrinsics_publisher
     global objects_publisher, lidar_publisher, clock_publisher, use_sim_time
+    global lidar_rings_publisher, lidar_low_publisher, lidar_high_publisher
+    global lidar_rings
     global raw_rgb_publisher, raw_depth_publisher, raw_intrinsics_publisher
     global raw_lidar_publisher, clock_diagnostics_publisher, clock_emulator
     global latest_lidar_clock_sample, latest_lidar_clock_update_monotonic_ns
@@ -2424,12 +2792,16 @@ def initialize_camera(config: dict[str, Any]):
     global camera_frame_id, base_frame_id, lidar_frame_id, eye_height
     global rgb_topic, depth_topic, extrinsics_topic, intrinsics_topic
     global odom_topic, odom_frame_id, objects_topic, lidar_topic
+    global lidar_rings_topic, lidar_low_topic, lidar_high_topic
     global raw_rgb_topic, raw_depth_topic, raw_intrinsics_topic, raw_lidar_topic
     global clock_diagnostics_topic
     global camera_stream_hz, odom_stream_hz, lidar_stream_hz
     global lidar_ray_count, lidar_range_max
     global route_inspection_half_width_m, route_inspection_sample_spacing_m
     global route_inspection_max_blocks
+    global search_area_blocks_per_tick, search_area_max_blocks, search_area_los_per_tick
+    global search_area_default_timeout_s, search_area_default_max_results
+    global search_area_default_max_distance_m
     ready = init_mod(config)
     if isinstance(ready, Err):
         return ready
@@ -2449,7 +2821,7 @@ def initialize_camera(config: dict[str, Any]):
         return Err("camera publisher initialization is incomplete; restart the provider")
     try:
         from geometry_msgs.msg import TransformStamped  # type: ignore
-        from sensor_msgs.msg import CameraInfo, Image as RosImage, LaserScan  # type: ignore
+        from sensor_msgs.msg import CameraInfo, Image as RosImage, LaserScan, PointCloud2  # type: ignore
         from std_msgs.msg import String  # type: ignore
 
         use_sim_time = configured_use_sim_time(config)
@@ -2471,11 +2843,20 @@ def initialize_camera(config: dict[str, Any]):
         lidar_stream_hz = configured_frequency("RBNX_MINECRAFT_LIDAR_HZ", 5.0)
         lidar_ray_count = configured_lidar_ray_count(config)
         lidar_range_max = configured_lidar_range(config)
+        lidar_rings = configured_lidar_rings(config)
         (
             route_inspection_half_width_m,
             route_inspection_sample_spacing_m,
             route_inspection_max_blocks,
         ) = configured_route_inspection(config)
+        (
+            search_area_blocks_per_tick,
+            search_area_max_blocks,
+            search_area_los_per_tick,
+            search_area_default_timeout_s,
+            search_area_default_max_results,
+            search_area_default_max_distance_m,
+        ) = configured_search_area(config)
         camera_frame_id = str(config.get("camera_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_CAMERA_FRAME_ID", camera_frame_id,
         ))
@@ -2506,6 +2887,15 @@ def initialize_camera(config: dict[str, Any]):
         ))
         lidar_topic = str(config.get("lidar_topic") or os.environ.get(
             "RBNX_MINECRAFT_LIDAR_TOPIC", lidar_topic,
+        ))
+        lidar_rings_topic = str(config.get("lidar_rings_topic") or os.environ.get(
+            "RBNX_MINECRAFT_LIDAR_RINGS_TOPIC", lidar_rings_topic,
+        ))
+        lidar_low_topic = str(config.get("lidar_low_topic") or os.environ.get(
+            "RBNX_MINECRAFT_LIDAR_LOW_TOPIC", lidar_low_topic,
+        ))
+        lidar_high_topic = str(config.get("lidar_high_topic") or os.environ.get(
+            "RBNX_MINECRAFT_LIDAR_HIGH_TOPIC", lidar_high_topic,
         ))
         odom_frame_id = str(config.get("odom_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_ODOM_FRAME_ID", odom_frame_id,
@@ -2553,6 +2943,31 @@ def initialize_camera(config: dict[str, Any]):
             qos="best_effort",
             time_descriptor=lidar_time_descriptor,
         )
+        if lidar_rings:
+            lidar_rings_publisher = minecraft_lidar.create_publisher(
+                "robonix/primitive/lidar/lidar_rings",
+                topic=lidar_rings_topic,
+                msg_type=PointCloud2,
+                qos="best_effort",
+                time_descriptor=lidar_time_descriptor,
+            )
+            ring_names = {str(ring["name"]) for ring in lidar_rings}
+            if "low" in ring_names:
+                lidar_low_publisher = minecraft_lidar.create_publisher(
+                    "robonix/primitive/lidar/lidar_low",
+                    topic=lidar_low_topic,
+                    msg_type=LaserScan,
+                    qos="best_effort",
+                    time_descriptor=lidar_time_descriptor,
+                )
+            if "high" in ring_names:
+                lidar_high_publisher = minecraft_lidar.create_publisher(
+                    "robonix/primitive/lidar/lidar_high",
+                    topic=lidar_high_topic,
+                    msg_type=LaserScan,
+                    qos="best_effort",
+                    time_descriptor=lidar_time_descriptor,
+                )
         if clock_emulator.enabled:
             node = RosBackend.get().node
             raw_rgb_publisher = node.create_publisher(RosImage, raw_rgb_topic, 10)

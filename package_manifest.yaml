@@ -14,39 +14,72 @@ start: bash scripts/start.sh
 
 capabilities:
   - name: robonix/primitive/camera/snapshot
+    transport: mcp
   - name: robonix/primitive/camera/depth_snapshot
+    transport: mcp
   - name: robonix/primitive/camera/rgb
+    transport: ros2
   - name: robonix/primitive/camera/depth
+    transport: ros2
   - name: robonix/primitive/camera/extrinsics
+    transport: ros2
   - name: robonix/primitive/camera/intrinsics
+    transport: ros2
   - name: robonix/primitive/lidar/lidar
+    transport: ros2
+  - name: robonix/primitive/lidar/lidar_rings
+    transport: ros2
+  - name: robonix/primitive/lidar/lidar_low
+    transport: ros2
+  - name: robonix/primitive/lidar/lidar_high
+    transport: ros2
   - name: robonix/primitive/clock/get_status
+    transport: grpc
   - name: robonix/primitive/clock/watch_status
+    transport: grpc
   - name: robonix/primitive/chassis/move
+    transport: [grpc, mcp]
   - name: robonix/primitive/chassis/odom
+    transport: ros2
   - name: robonix/primitive/perception/objects
+    transport: ros2
     path: capabilities/perception/objects.v1.toml
   - name: robonix/primitive/minecraft/inventory
+    transport: mcp
     path: capabilities/minecraft/inventory.v1.toml
   - name: robonix/primitive/minecraft/select_inventory_item
+    transport: mcp
     path: capabilities/minecraft/select_inventory_item.v1.toml
   - name: robonix/primitive/minecraft/get_state
+    transport: mcp
     path: capabilities/minecraft/get_state.v1.toml
   - name: robonix/primitive/minecraft/aim_at_block
+    transport: mcp
     path: capabilities/minecraft/aim_at_block.v2.toml
   - name: robonix/primitive/minecraft/break_block
+    transport: mcp
     path: capabilities/minecraft/break_block.v1.toml
   - name: robonix/primitive/minecraft/inspect_route_path
+    transport: mcp
     path: capabilities/minecraft/inspect_route_path.v1.toml
+  - name: robonix/primitive/minecraft/search_area_for_object
+    transport: mcp
+    path: capabilities/minecraft/search_area_for_object.v1.toml
   - name: robonix/primitive/minecraft/clear_route_path
+    transport: mcp
     path: capabilities/minecraft/clear_route_path.v1.toml
   - name: robonix/primitive/minecraft/attack_entity
+    transport: mcp
     path: capabilities/minecraft/attack_entity.v1.toml
   - name: robonix/primitive/minecraft/deposit_item
+    transport: mcp
     path: capabilities/minecraft/deposit_item.v2.toml
   - name: robonix/primitive/minecraft/withdraw_item
+    transport: mcp
     path: capabilities/minecraft/withdraw_item.v2.toml
   - name: robonix/primitive/minecraft/inspect_container
+    transport: mcp
     path: capabilities/minecraft/inspect_container.v2.toml
   - name: robonix/primitive/minecraft/fill_water_bottles
+    transport: mcp
     path: capabilities/minecraft/fill_water_bottles.v2.toml

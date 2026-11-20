@@ -1,0 +1,12 @@
+[contract]
+id = "robonix/primitive/minecraft/search_area_for_object"
+version = "1"
+kind = "primitive"
+idl = "minecraft/srv/SearchAreaForObject.srv"
+description = "Search a known horizontal area for line-of-sight visible blocks with exact registry labels, without moving the player. Copy points_xy unchanged from scene/list_regions; coordinates are minecraft_odom east/north, and native z = -north. Only loaded chunks are scanned, and only blocks visible from the player's eye within max_distance_m are returned. Matches whose labels are semantic objects (chest, trapped_chest, crafting_table, furnace, cauldron, water_cauldron, iron_door, elevator_controller) are registered as Scene objects, so navigate_to_object can use the returned object_id. Other labels are returned as native coordinates with registered=false. A timeout returns the visible matches found so far."
+
+[mode]
+type = "rpc"
+
+[semantics]
+user_invocable = true

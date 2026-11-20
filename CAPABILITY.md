@@ -139,6 +139,21 @@ This package exposes a real Forge 1.20.4 client through existing contracts.
     partial or failed clear.
   - Stop as soon as a route exists and clear no more than the provider's
     configured obstacle limit per recovery attempt.
+- `robonix/primitive/minecraft/search_area_for_object`
+  - Searches one known horizontal polygon in `minecraft_odom` for exact block
+    registry labels without moving the player. Copy `points_xy` unchanged from
+    `scene/list_regions`; each pair is east/north and native `z = -north`.
+  - Inspects only loaded chunks within the vertical window around the player
+    and returns only blocks with a clear line of sight from the player's eye
+    within `max_distance_m`, which defaults to 32 metres. It does not use
+    x-ray or force-load chunks. Nearest columns are scanned first, and a
+    timeout returns the visible matches found so far.
+  - Whitelisted semantic matches (chest, trapped chest, crafting table,
+    furnace, cauldron, water cauldron, iron door, elevator controller) are
+    inserted into the normal discovery snapshot, so the next 10 Hz observation
+    registers them in Scene and `navigate_to_object` can use the returned
+    `object_id`. Other labels return native coordinates with
+    `registered=false`.
 - `robonix/primitive/minecraft/attack_entity`
   - Resolves one Scene-selected `minecraft:zombie`, or `minecraft:player`
     permitted by disabled/allowlist/all combat mode, ID to its native Entity UUID

@@ -62,6 +62,24 @@ config:
   # float, metres, default: 16; must be finite and within [1, 64].
   lidar_range_max: 16.0
 
+  # list of {name: string, height_m: float}, default: [] (legacy single scan).
+  # Each entry adds one collision-ray ring above the player's feet. Names must
+  # be unique; heights are finite and within [0, 3]. When non-empty the driver
+  # requests per-ring scans and publishes lidar_rings as PointCloud2.
+  lidar_rings: []
+
+  # string, ROS topic, default: /minecraft/lidar/points.
+  # Combined body-relative point cloud (x/y/z FLOAT32) for configured rings.
+  lidar_rings_topic: /minecraft/lidar/points
+
+  # string, ROS topic, default: /minecraft/lidar/scan_low.
+  # Optional LaserScan view for a ring named "low".
+  lidar_low_topic: /minecraft/lidar/scan_low
+
+  # string, ROS topic, default: /minecraft/lidar/scan_high.
+  # Optional LaserScan view for a ring named "high".
+  lidar_high_topic: /minecraft/lidar/scan_high
+
   # string, fully-qualified ROS topic, default: /cmd_vel.
   # Generic Navigation's guarded Twist output. The bridge is active only while
   # the chassis lifecycle is ACTIVE.
@@ -92,3 +110,27 @@ config:
   # integer, blocks, default: 64; must be within [1, 256].
   # Maximum combined dirt and non-dirt obstacles accepted in one inspection.
   route_inspection_max_blocks: 64
+
+  # integer, blocks, default: 2048; must be within [256, 16384].
+  # Maximum block positions inspected per client tick during an area search.
+  search_area_blocks_per_tick: 2048
+
+  # integer, blocks, default: 262144; must be within [1, 1048576].
+  # Maximum candidate blocks accepted for one search_area_for_object request.
+  search_area_max_blocks: 262144
+
+  # integer, raycasts, default: 64; must be within [8, 512].
+  # Maximum line-of-sight checks performed per client tick during an area search.
+  search_area_los_per_tick: 64
+
+  # float, seconds, default: 8; must be finite and within [1, 15].
+  # Default scan deadline used when the caller sends timeout_s=0.
+  search_area_default_timeout_s: 8.0
+
+  # integer, blocks, default: 32; must be within [1, 64].
+  # Default result cap used when the caller sends max_results=0.
+  search_area_default_max_results: 32
+
+  # float, blocks/metres, default: 32; must be finite and within [1, 48].
+  # Default eye-to-block-center distance used when max_distance_m=0.
+  search_area_default_max_distance_m: 32.0

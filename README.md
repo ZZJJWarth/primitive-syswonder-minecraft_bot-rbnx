@@ -301,6 +301,13 @@ Pilot can also compose the Minecraft state and action capabilities directly:
   has stopped. A stale traversed path prefix is discarded by aligning the live
   player to the nearest route segment. The support layer is never cleared;
   non-dirt blockers remain for a fresh navigation decision.
+- `robonix/primitive/minecraft/search_area_for_object` searches a known area
+  for objects that Scene has not registered yet. Pass the region `points_xy`
+  from `scene/list_regions` unchanged. The Mod scans only loaded chunks around
+  the robot and returns just the blocks that have a clear line of sight within
+  32 metres by default. Whitelisted objects such as chests are registered into
+  Scene, so a subsequent `navigate_to_object` can use the returned `object_id`;
+  other labels return native coordinates with `registered=false`.
 - `robonix/primitive/minecraft/attack_entity` accepts a Scene-selected
   `minecraft:zombie`, or a player permitted by the configured combat mode,
   `minecraft:player`, object ID and resolves it to the live Entity UUID. The Mod

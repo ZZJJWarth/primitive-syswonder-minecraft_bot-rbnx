@@ -152,6 +152,11 @@ public final class LocalCommandServer implements AutoCloseable {
             case "lidar_scan" -> lidarScan(
                     request.has("ray_count") ? request.get("ray_count").getAsInt() : 180,
                     request.has("range_max") ? request.get("range_max").getAsDouble() : 16.0);
+            case "lidar_scan_rings" -> lidarScanRings(
+                    request.has("ray_count") ? request.get("ray_count").getAsInt() : 180,
+                    request.has("range_max") ? request.get("range_max").getAsDouble() : 32.0,
+                    request.has("rings") && request.get("rings").isJsonArray()
+                            ? request.getAsJsonArray("rings") : new JsonArray());
             case "move" -> request.has("distance")
                     ? control.moveDistance(
                             request.has("direction") ? request.get("direction").getAsString() : "forward",
@@ -196,6 +201,16 @@ public final class LocalCommandServer implements AutoCloseable {
                     request.has("half_width") ? request.get("half_width").getAsDouble() : 0.35,
                     request.has("sample_spacing") ? request.get("sample_spacing").getAsDouble() : 0.25,
                     request.has("max_blocks") ? requiredInt(request, "max_blocks") : 64);
+            case "search_area_for_object" -> actions.searchAreaForObject(
+                    requiredDoubleArray(request, "points_xy"),
+                    requiredInt(request, "vertical_radius"),
+                    requiredStringArray(request, "target_labels", 8),
+                    request.get("max_distance_m").getAsDouble(),
+                    request.get("timeout_s").getAsDouble(),
+                    requiredInt(request, "max_results"),
+                    requiredInt(request, "blocks_per_tick"),
+                    requiredInt(request, "max_blocks"),
+                    requiredInt(request, "los_per_tick"));
             case "attack_entity" -> actions.attackEntity(
                     requiredString(request, "entity_uuid"),
                     requiredString(request, "expected_entity"));
@@ -261,6 +276,36 @@ public final class LocalCommandServer implements AutoCloseable {
         minecraft.execute(() -> {
             try {
                 result.complete(LidarScan.capture(minecraft, simulationClock, rayCount, rangeMax));
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
+    }
+
+    /** Schedules per-ring collision raycasts on the Minecraft client thread. */
+    private CompletableFuture<JsonObject> lidarScanRings(
+            int rayCount, double rangeMax, JsonArray rawRings
+    ) {
+        var rings = new java.util.ArrayList<LidarScan.Ring>();
+        for (var element : rawRings) {
+            if (!element.isJsonObject()) {
+                throw new IllegalArgumentException("each lidar ring must be an object");
+            }
+            JsonObject ring = element.getAsJsonObject();
+            if (!ring.has("height_m")) {
+                throw new IllegalArgumentException("each lidar ring needs height_m");
+            }
+            rings.add(new LidarScan.Ring(
+                    requiredString(ring, "name"),
+                    ring.get("height_m").getAsDouble()));
+        }
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            try {
+                result.complete(LidarScan.captureRings(
+                        minecraft, simulationClock, rayCount, rangeMax, rings));
             } catch (Exception exception) {
                 result.completeExceptionally(exception);
             }
@@ -469,6 +514,28 @@ public final class LocalCommandServer implements AutoCloseable {
                 throw new IllegalArgumentException("array contains a non-finite number: " + name);
             }
             values[index] = value;
+        }
+        return values;
+    }
+
+    /** Reads a required array of non-empty strings within a maximum length. */
+    private static String[] requiredStringArray(JsonObject request, String name, int maxLength) {
+        if (!request.has(name) || !request.get(name).isJsonArray()) {
+            throw new IllegalArgumentException("missing string array field: " + name);
+        }
+        JsonArray array = request.getAsJsonArray(name);
+        if (array.size() > maxLength) {
+            throw new IllegalArgumentException("string array field has too many entries: " + name);
+        }
+        String[] values = new String[array.size()];
+        for (int index = 0; index < array.size(); index++) {
+            if (!array.get(index).isJsonPrimitive()
+                    || !array.get(index).getAsJsonPrimitive().isString()
+                    || array.get(index).getAsString().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "array must contain only non-empty strings: " + name);
+            }
+            values[index] = array.get(index).getAsString();
         }
         return values;
     }

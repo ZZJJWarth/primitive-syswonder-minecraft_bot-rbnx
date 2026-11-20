@@ -3,6 +3,11 @@ package com.robonix.minecraftmod;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -11,6 +16,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
@@ -32,6 +38,7 @@ import net.minecraft.world.item.alchemy.PotionUtils;
 import net.minecraft.world.item.alchemy.Potions;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LayeredCauldronBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -60,6 +67,18 @@ public final class MinecraftActions implements AutoCloseable {
     private static final double ATTACK_REACH_DISTANCE = 3.1;
     /** A blocked-path snapshot must start near the live Minecraft player. */
     private static final double MAX_ROUTE_ALIGNMENT_DISTANCE_M = 2.0;
+    private static final int SEARCH_COLUMN_CAP = 65_536;
+    private static final int SEARCH_CANDIDATE_CAP = 262_144;
+    private static final int SEARCH_MAX_CONFIGURED_BLOCKS = 1_048_576;
+    private static final int SEARCH_MIN_BLOCKS_PER_TICK = 256;
+    private static final int SEARCH_MAX_BLOCKS_PER_TICK = 16_384;
+    private static final int SEARCH_MIN_LOS_PER_TICK = 8;
+    private static final int SEARCH_MAX_LOS_PER_TICK = 512;
+    private static final double SEARCH_MIN_DISTANCE_M = 1.0;
+    private static final double SEARCH_MAX_DISTANCE_M = 48.0;
+    private static final double SEARCH_MIN_TIMEOUT_SECONDS = 1.0;
+    private static final double SEARCH_MAX_TIMEOUT_SECONDS = 15.0;
+    private static final int SEARCH_MAX_RESULTS = 64;
     private static final ResourceLocation DIRT = ResourceLocation.fromNamespaceAndPath("minecraft", "dirt");
     private static final ResourceLocation CRAFTING_TABLE =
             ResourceLocation.fromNamespaceAndPath("minecraft", "crafting_table");
@@ -445,6 +464,108 @@ public final class MinecraftActions implements AutoCloseable {
         });
     }
 
+    /**
+     * Starts a bounded client-tick scan of one known horizontal area for
+     * line-of-sight visible blocks with exact registry labels. The scan does
+     * not move the player and only inspects already-loaded chunks.
+     */
+    public CompletableFuture<JsonObject> searchAreaForObject(
+            double[] pointsXy,
+            int verticalRadius,
+            String[] targetLabels,
+            double maxDistanceM,
+            double timeoutSeconds,
+            int maxResults,
+            int blocksPerTick,
+            int maxBlocks,
+            int losPerTick
+    ) {
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        Minecraft.getInstance().execute(() -> {
+            try {
+                requireNoActiveAction();
+                AreaSearch.validate(pointsXy);
+                if (verticalRadius < 0 || verticalRadius > 16) {
+                    throw new IllegalArgumentException("vertical_radius must be from 0 through 16");
+                }
+                if (!Double.isFinite(maxDistanceM)
+                        || maxDistanceM < SEARCH_MIN_DISTANCE_M
+                        || maxDistanceM > SEARCH_MAX_DISTANCE_M) {
+                    throw new IllegalArgumentException("max_distance_m must be from 1 through 48");
+                }
+                if (!Double.isFinite(timeoutSeconds)
+                        || timeoutSeconds < SEARCH_MIN_TIMEOUT_SECONDS
+                        || timeoutSeconds > SEARCH_MAX_TIMEOUT_SECONDS) {
+                    throw new IllegalArgumentException("timeout_s must be from 1 through 15");
+                }
+                if (maxResults < 1 || maxResults > SEARCH_MAX_RESULTS) {
+                    throw new IllegalArgumentException("max_results must be from 1 through 64");
+                }
+                if (blocksPerTick < SEARCH_MIN_BLOCKS_PER_TICK
+                        || blocksPerTick > SEARCH_MAX_BLOCKS_PER_TICK) {
+                    throw new IllegalArgumentException(
+                            "blocks_per_tick must be from 256 through 16384");
+                }
+                if (maxBlocks < 1 || maxBlocks > SEARCH_MAX_CONFIGURED_BLOCKS) {
+                    throw new IllegalArgumentException(
+                            "max_blocks must be from 1 through 1048576");
+                }
+                if (losPerTick < SEARCH_MIN_LOS_PER_TICK
+                        || losPerTick > SEARCH_MAX_LOS_PER_TICK) {
+                    throw new IllegalArgumentException("los_per_tick must be from 8 through 512");
+                }
+                if (targetLabels == null || targetLabels.length < 1 || targetLabels.length > 8) {
+                    throw new IllegalArgumentException(
+                            "target_labels must contain from 1 through 8 block registry names");
+                }
+                Minecraft minecraft = Minecraft.getInstance();
+                LocalPlayer player = requirePlayer(minecraft);
+                ClientLevel level = minecraft.level;
+                var registry = level.registryAccess().registryOrThrow(Registries.BLOCK);
+                Map<Block, String> targets = new LinkedHashMap<>();
+                for (String label : targetLabels) {
+                    ResourceLocation name = label == null ? null : ResourceLocation.tryParse(label);
+                    if (name == null || !registry.containsKey(name)) {
+                        throw new IllegalArgumentException(
+                                "target label is not registered: " + label);
+                    }
+                    targets.put(registry.get(name), label);
+                }
+                double[] nativePoints = AreaSearch.toNative(pointsXy);
+                int[] bounds = AreaSearch.bounds(nativePoints);
+                long[] columns = AreaSearch.columns(
+                        nativePoints, bounds, player.getX(), player.getZ(), SEARCH_COLUMN_CAP);
+                long layers = verticalRadius * 2L + 1L;
+                long candidateBlocks = columns.length * layers;
+                int effectiveMaxBlocks = Math.min(maxBlocks, SEARCH_CANDIDATE_CAP);
+                if (candidateBlocks > effectiveMaxBlocks) {
+                    throw new IllegalArgumentException(
+                            "search area contains " + candidateBlocks
+                                    + " candidate blocks; maximum is " + effectiveMaxBlocks);
+                }
+                control.stopForAction();
+                activeAction = new ActiveSearchArea(
+                        player,
+                        level,
+                        level.dimension().location().toString(),
+                        columns,
+                        player.blockPosition().getY() - verticalRadius,
+                        player.blockPosition().getY() + verticalRadius,
+                        Map.copyOf(targets),
+                        maxDistanceM,
+                        maxResults,
+                        blocksPerTick,
+                        losPerTick,
+                        candidateBlocks,
+                        System.nanoTime() + (long) (timeoutSeconds * 1_000_000_000L),
+                        result);
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
+    }
+
     /** Encodes inspected native block identities while keeping coordinates local to the Mod. */
     private static JsonArray blockArray(Map<BlockPos, String> blocks) {
         JsonArray result = new JsonArray();
@@ -761,6 +882,16 @@ public final class MinecraftActions implements AutoCloseable {
             if (!player.isAlive()) {
                 throw new IllegalStateException("item action interrupted by player death");
             }
+            if (action instanceof ActiveSearchArea search) {
+                if (minecraft.level != search.level()) {
+                    throw new IllegalStateException("area search interrupted by a dimension change");
+                }
+                if (System.nanoTime() >= action.deadlineNanos()) {
+                    search.markTimedOut();
+                    finishSearchArea(search);
+                    return;
+                }
+            }
             if (System.nanoTime() >= action.deadlineNanos()) {
                 throw new TimeoutException("item action did not complete before timeout");
             }
@@ -780,6 +911,8 @@ public final class MinecraftActions implements AutoCloseable {
                 tickFillWaterBottles(minecraft, player, fill);
             } else if (action instanceof ActiveAim aiming) {
                 tickAim(minecraft, player, aiming);
+            } else if (action instanceof ActiveSearchArea search) {
+                tickSearchArea(minecraft, player, search);
             }
         } catch (Exception exception) {
             finishActive(exception);
@@ -1504,6 +1637,126 @@ public final class MinecraftActions implements AutoCloseable {
         finishActive(response);
     }
 
+    /** Advances one area scan within the per-tick block and raycast budgets. */
+    private void tickSearchArea(Minecraft minecraft, LocalPlayer player, ActiveSearchArea action) {
+        ClientLevel level = action.level();
+        Vec3 eye = player.getEyePosition();
+        long[] columns = action.columns();
+        int blockBudget = action.blocksPerTick();
+        int losBudget = action.losPerTick();
+        while (action.columnIndex() < columns.length) {
+            if (blockBudget <= 0) {
+                return;
+            }
+            long packed = columns[action.columnIndex()];
+            int x = AreaSearch.unpackX(packed);
+            int z = AreaSearch.unpackZ(packed);
+            if (action.currentY() > action.maxY()) {
+                action.advanceColumn();
+                continue;
+            }
+            if (action.columnCursor() != action.columnIndex()) {
+                int chunkX = x >> 4;
+                int chunkZ = z >> 4;
+                long chunkKey = AreaSearch.pack(chunkX, chunkZ);
+                Boolean loaded = action.chunkAvailability().get(chunkKey);
+                if (loaded == null) {
+                    loaded = level.getChunkSource().hasChunk(chunkX, chunkZ);
+                    action.chunkAvailability().put(chunkKey, loaded);
+                    if (!loaded) {
+                        action.skippedChunkKeys().add(chunkKey);
+                    }
+                }
+                if (!loaded) {
+                    action.skipColumn();
+                    continue;
+                }
+                action.setColumnCursor(action.columnIndex());
+            }
+            int y = action.currentY();
+            BlockPos position = new BlockPos(x, y, z);
+            BlockState state = level.getBlockState(position);
+            String label = state.isAir() ? null : action.targets().get(state.getBlock());
+            if (label != null && losBudget <= 0) {
+                return;
+            }
+            action.advanceY();
+            blockBudget--;
+            action.incrementScannedBlocks();
+            if (label == null) {
+                continue;
+            }
+            losBudget--;
+            Vec3 center = Vec3.atCenterOf(position);
+            double distance = eye.distanceTo(center);
+            if (distance > action.maxDistanceM()
+                    || !ObservationFactory.isVisible(level, player, position)) {
+                continue;
+            }
+            boolean registered = ObservationFactory.rememberVisibleBlock(
+                    level, player, action.dimension(), position, label);
+            action.matches().add(new ActiveSearchArea.SearchMatch(
+                    label, x, y, z, distance, registered));
+            if (action.matches().size() >= action.maxResults()) {
+                action.markTruncated();
+                finishSearchArea(action);
+                return;
+            }
+        }
+        finishSearchArea(action);
+    }
+
+    /** Completes an area scan with distance-ordered results and bounded counters. */
+    private void finishSearchArea(ActiveSearchArea action) {
+        List<ActiveSearchArea.SearchMatch> matches = new ArrayList<>(action.matches());
+        matches.sort(Comparator
+                .comparingDouble(ActiveSearchArea.SearchMatch::distanceM)
+                .thenComparingInt(ActiveSearchArea.SearchMatch::x)
+                .thenComparingInt(ActiveSearchArea.SearchMatch::y)
+                .thenComparingInt(ActiveSearchArea.SearchMatch::z));
+        JsonArray array = new JsonArray();
+        for (ActiveSearchArea.SearchMatch match : matches) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("label", match.label());
+            entry.addProperty("x", match.x());
+            entry.addProperty("y", match.y());
+            entry.addProperty("z", match.z());
+            entry.addProperty("distance_m", match.distanceM());
+            entry.addProperty("registered", match.registered());
+            array.add(entry);
+        }
+        JsonObject response = new JsonObject();
+        response.addProperty("found", !matches.isEmpty());
+        response.addProperty("dimension", action.dimension());
+        response.addProperty("candidate_blocks", action.candidateBlocks());
+        response.addProperty("scanned_blocks", action.scannedBlocks());
+        response.addProperty("skipped_unloaded_chunks", action.skippedChunkKeys().size());
+        response.addProperty("truncated", action.truncated());
+        response.addProperty("timed_out", action.timedOut());
+        String detail;
+        if (action.columns().length == 0) {
+            detail = "search area contains no block centers";
+        } else if (matches.isEmpty()) {
+            detail = "no line-of-sight visible target block was found";
+        } else {
+            detail = "found " + matches.size() + " line-of-sight visible target block"
+                    + (matches.size() == 1 ? "" : "s");
+        }
+        if (action.timedOut()) {
+            detail += "; search timed out before completing the area";
+        }
+        if (action.truncated()) {
+            detail += "; stopped at max_results";
+        }
+        if (!action.skippedChunkKeys().isEmpty()) {
+            detail += "; " + action.skippedChunkKeys().size() + " chunk column"
+                    + (action.skippedChunkKeys().size() == 1 ? " was" : "s were") + " not loaded";
+        }
+        response.addProperty("detail", detail);
+        response.add("matches", array);
+        finishActive(response);
+    }
+
     /** Completes an action successfully and performs its normal interaction cleanup. */
     private void finishActive(JsonObject response) {
         ActiveAction action = activeAction;
@@ -2052,7 +2305,8 @@ public final class MinecraftActions implements AutoCloseable {
     }
 
     private sealed interface ActiveAction permits ActiveAim, ActiveAttack, ActiveBreak, ActiveDeposit,
-            ActiveWithdraw, ActiveInspectContainer, ActiveFillWaterBottles, ActiveSelectInventoryItem {
+            ActiveWithdraw, ActiveInspectContainer, ActiveFillWaterBottles, ActiveSelectInventoryItem,
+            ActiveSearchArea {
         LocalPlayer player();
 
         long deadlineNanos();
@@ -2253,6 +2507,103 @@ public final class MinecraftActions implements AutoCloseable {
         void setLastStepNanos(long value) { lastStepNanos = value; }
         int incrementStableHitTicks() { return ++stableHitTicks; }
         void resetStableHitTicks() { stableHitTicks = 0; }
+    }
+
+    /** Retains the horizontal area, resume position, and bounded counters for one scan. */
+    private static final class ActiveSearchArea implements ActiveAction {
+        record SearchMatch(String label, int x, int y, int z, double distanceM, boolean registered) {}
+
+        private final LocalPlayer player;
+        private final ClientLevel level;
+        private final String dimension;
+        private final long[] columns;
+        private final int minY;
+        private final int maxY;
+        private final Map<Block, String> targets;
+        private final double maxDistanceM;
+        private final int maxResults;
+        private final int blocksPerTick;
+        private final int losPerTick;
+        private final long candidateBlocks;
+        private final long deadlineNanos;
+        private final CompletableFuture<JsonObject> result;
+        private final List<SearchMatch> matches = new ArrayList<>();
+        private final Map<Long, Boolean> chunkAvailability = new HashMap<>();
+        private final Set<Long> skippedChunkKeys = new HashSet<>();
+        private int columnIndex;
+        private int currentY;
+        private int columnCursor = -1;
+        private int scannedBlocks;
+        private boolean truncated;
+        private boolean timedOut;
+
+        ActiveSearchArea(
+                LocalPlayer player,
+                ClientLevel level,
+                String dimension,
+                long[] columns,
+                int minY,
+                int maxY,
+                Map<Block, String> targets,
+                double maxDistanceM,
+                int maxResults,
+                int blocksPerTick,
+                int losPerTick,
+                long candidateBlocks,
+                long deadlineNanos,
+                CompletableFuture<JsonObject> result
+        ) {
+            this.player = player;
+            this.level = level;
+            this.dimension = dimension;
+            this.columns = columns;
+            this.minY = minY;
+            this.maxY = maxY;
+            this.targets = targets;
+            this.maxDistanceM = maxDistanceM;
+            this.maxResults = maxResults;
+            this.blocksPerTick = blocksPerTick;
+            this.losPerTick = losPerTick;
+            this.candidateBlocks = candidateBlocks;
+            this.deadlineNanos = deadlineNanos;
+            this.result = result;
+            this.currentY = minY;
+        }
+
+        @Override public LocalPlayer player() { return player; }
+        @Override public long deadlineNanos() { return deadlineNanos; }
+        @Override public CompletableFuture<JsonObject> result() { return result; }
+        ClientLevel level() { return level; }
+        String dimension() { return dimension; }
+        long[] columns() { return columns; }
+        int minY() { return minY; }
+        int maxY() { return maxY; }
+        Map<Block, String> targets() { return targets; }
+        double maxDistanceM() { return maxDistanceM; }
+        int maxResults() { return maxResults; }
+        int blocksPerTick() { return blocksPerTick; }
+        int losPerTick() { return losPerTick; }
+        long candidateBlocks() { return candidateBlocks; }
+        List<SearchMatch> matches() { return matches; }
+        Map<Long, Boolean> chunkAvailability() { return chunkAvailability; }
+        Set<Long> skippedChunkKeys() { return skippedChunkKeys; }
+        int columnIndex() { return columnIndex; }
+        int currentY() { return currentY; }
+        int columnCursor() { return columnCursor; }
+        int scannedBlocks() { return scannedBlocks; }
+        boolean truncated() { return truncated; }
+        boolean timedOut() { return timedOut; }
+        void advanceY() { currentY++; }
+        void advanceColumn() {
+            columnIndex++;
+            currentY = minY;
+            columnCursor = -1;
+        }
+        void skipColumn() { currentY = maxY + 1; }
+        void setColumnCursor(int value) { columnCursor = value; }
+        void incrementScannedBlocks() { scannedBlocks++; }
+        void markTruncated() { truncated = true; }
+        void markTimedOut() { timedOut = true; }
     }
 
     /** Retains break input state while advancing from destruction to pickup. */

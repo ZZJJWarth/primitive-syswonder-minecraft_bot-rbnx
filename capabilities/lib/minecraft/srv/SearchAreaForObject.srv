@@ -1,0 +1,19 @@
+# Scan one known horizontal area for visible semantic blocks.
+# points_xy is a flat minecraft_odom polygon copied unchanged from scene/list_regions:
+# [east0, north0, east1, north1, ...]; native z = -north.
+float64[] points_xy
+int32 vertical_radius
+string[] target_labels
+float64 max_distance_m
+float64 timeout_s
+int32 max_results
+---
+bool found
+string dimension
+uint32 candidate_blocks
+uint32 scanned_blocks
+uint32 skipped_unloaded_chunks
+bool truncated
+bool timed_out
+string detail
+minecraft/SearchMatch[] matches
