@@ -134,3 +134,26 @@ config:
   # float, blocks/metres, default: 32; must be finite and within [1, 48].
   # Default eye-to-block-center distance used when max_distance_m=0.
   search_area_default_max_distance_m: 32.0
+
+  # boolean, default: false.
+  # Publish simulated onboard RTK GNSS fix and status from placed rtk_base_station blocks.
+  rtk_enabled: false
+
+  # string, ROS topic, default: /minecraft/gnss/rtk_fix.
+  rtk_topic: /minecraft/gnss/rtk_fix
+
+  # string, ROS topic, default: /minecraft/gnss/rtk_status.
+  rtk_status_topic: /minecraft/gnss/rtk_status
+
+  # string, ROS frame ID, default: campus_rtk.
+  rtk_frame_id: campus_rtk
+
+  # float, Hz, default: 5.0; must be finite and within [0.5, 20].
+  rtk_stream_hz: 5.0
+
+  # float, metres, default: 256.0; must be finite and within [10, 4096].
+  rtk_max_range_m: 256.0
+
+  # boolean, default: true.
+  # Apply realistic fix-quality-dependent Gaussian noise to RTK coordinates.
+  rtk_noise_enabled: true

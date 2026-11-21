@@ -1,0 +1,7 @@
+float64 odom_x
+float64 odom_y
+float64 odom_z
+---
+string container_type
+uint32 slot_count
+minecraft/InventorySlot[] slots

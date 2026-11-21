@@ -157,6 +157,9 @@ public final class LocalCommandServer implements AutoCloseable {
                     request.has("range_max") ? request.get("range_max").getAsDouble() : 32.0,
                     request.has("rings") && request.get("rings").isJsonArray()
                             ? request.getAsJsonArray("rings") : new JsonArray());
+            case "rtk_fix" -> rtkFix(
+                    request.has("max_range_m") ? request.get("max_range_m").getAsDouble() : 256.0,
+                    !request.has("noise_enabled") || request.get("noise_enabled").getAsBoolean());
             case "move" -> request.has("distance")
                     ? control.moveDistance(
                             request.has("direction") ? request.get("direction").getAsString() : "forward",
@@ -326,6 +329,29 @@ public final class LocalCommandServer implements AutoCloseable {
             }
         });
         return result;
+    }
+
+    /** Computes the simulated onboard RTK GNSS fix for the local rover client. */
+    private CompletableFuture<JsonObject> rtkFix(double maxRangeM, boolean noiseEnabled) {
+        if (!Double.isFinite(maxRangeM) || maxRangeM <= 0.0 || maxRangeM > 4096.0) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("max_range_m must be finite and within (0, 4096]"));
+        }
+        return minecraftCall(() -> {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.level == null || minecraft.player == null) {
+                throw new IllegalStateException("Minecraft client is not in a world");
+            }
+            String dim = minecraft.level.dimension().location().toString();
+            var stations = RtkClientCache.stationsFor(dim);
+            double ts = minecraft.level.getGameTime() / 20.0;
+            var fix = RtkPhysics.computeFix(
+                    minecraft.level, minecraft.player, stations, maxRangeM, noiseEnabled, ts);
+            JsonObject result = new JsonObject();
+            result.add("rtkFix", fix.toJson());
+            result.addProperty("dimension", dim);
+            return result;
+        });
     }
 
     /** Returns the latest encoded framebuffer using the existing rendered-view shape. */

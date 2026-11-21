@@ -1,0 +1,10 @@
+float64 odom_x
+float64 odom_y
+float64 odom_z
+string expected_block
+---
+bool aimed
+string actual_block
+string hit_face
+float32 final_yaw_deg
+float32 final_pitch_deg

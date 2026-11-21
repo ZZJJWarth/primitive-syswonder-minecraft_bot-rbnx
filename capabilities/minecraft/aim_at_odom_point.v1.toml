@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/minecraft/aim_at_odom_point"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/AimAtOdomPoint.srv"
+description = "Aim the live crosshair at a sensor-estimated 3D point in minecraft_odom (east, north, up) and verify the struck block matches expected_block."
+
+[mode]
+type = "rpc"

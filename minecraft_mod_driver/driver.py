@@ -56,6 +56,8 @@ lidar_publisher = None
 lidar_rings_publisher = None
 lidar_low_publisher = None
 lidar_high_publisher = None
+rtk_fix_publisher = None
+rtk_status_publisher = None
 clock_publisher = None
 raw_rgb_publisher = None
 raw_depth_publisher = None
@@ -72,11 +74,13 @@ cmd_vel_subscription = None
 camera_stream_stop = threading.Event()
 odom_stream_stop = threading.Event()
 lidar_stream_stop = threading.Event()
+rtk_stream_stop = threading.Event()
 clock_stream_stop = threading.Event()
 cmd_vel_bridge_stop = threading.Event()
 camera_stream_thread: threading.Thread | None = None
 odom_stream_thread: threading.Thread | None = None
 lidar_stream_thread: threading.Thread | None = None
+rtk_stream_thread: threading.Thread | None = None
 clock_stream_thread: threading.Thread | None = None
 cmd_vel_bridge_thread: threading.Thread | None = None
 camera_lifecycle_lock = threading.Lock()
@@ -84,6 +88,7 @@ chassis_lifecycle_lock = threading.Lock()
 camera_worker_lock = threading.Lock()
 odom_worker_lock = threading.Lock()
 lidar_worker_lock = threading.Lock()
+rtk_worker_lock = threading.Lock()
 clock_worker_lock = threading.Lock()
 cmd_vel_worker_lock = threading.Lock()
 cmd_vel_state_lock = threading.Lock()
@@ -118,6 +123,7 @@ class RoutePathInspection:
 route_obstacles: dict[str, RouteObstacle] = {}
 route_path_inspections: dict[str, RoutePathInspection] = {}
 latest_cmd_vel: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+latest_observed_pitch_rad: float = 0.0
 previous_odom_sample: tuple[float, float, float, float] | None = None
 camera_stream_hz = 5.0
 odom_stream_hz = 10.0
@@ -131,6 +137,13 @@ lidar_rings: tuple[dict[str, object], ...] = ()
 lidar_rings_topic = "/minecraft/lidar/points"
 lidar_low_topic = "/minecraft/lidar/scan_low"
 lidar_high_topic = "/minecraft/lidar/scan_high"
+rtk_enabled = False
+rtk_topic = "/minecraft/gnss/rtk_fix"
+rtk_status_topic = "/minecraft/gnss/rtk_status"
+rtk_frame_id = "campus_rtk"
+rtk_stream_hz = 5.0
+rtk_max_range_m = 256.0
+rtk_noise_enabled = True
 odom_frame_id = "minecraft_odom"
 eye_height = 1.62
 rgb_topic = "/minecraft/camera/rgb"
@@ -882,7 +895,7 @@ def publish_clock_diagnostic(sample: ClockSample, payload: dict[str, Any]) -> No
 
 def publish_odom(observation: dict[str, Any], timestamp: float | None = None) -> None:
     """Publish exact player view odometry and its matching dynamic transform."""
-    global previous_odom_sample
+    global previous_odom_sample, latest_observed_pitch_rad
     if odom_publisher is None:
         raise RuntimeError("chassis odom publisher is not initialized")
     if odom_transform_broadcaster is None:
@@ -892,6 +905,7 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
 
     now = timestamp if timestamp is not None else time.time()
     x, y, z, yaw, pitch = observation_pose(observation)
+    latest_observed_pitch_rad = pitch
     forward = left = angular = 0.0
     if previous_odom_sample is not None:
         previous_time, previous_x, previous_y, previous_yaw = previous_odom_sample
@@ -1210,11 +1224,26 @@ def cmd_vel_message_values(message: Any) -> tuple[float, float, float]:
     return linear_x, linear_y, angular_z
 
 
+def cmd_vel_level_pitch_delta_deg(
+    pitch_rad: float,
+    max_step_deg: float = 30.0,
+    deadband_deg: float = 0.5,
+) -> float:
+    """Compute a bounded relative pitch delta (deg) to smoothly level gaze to 0 deg during navigation."""
+    if not math.isfinite(pitch_rad):
+        return 0.0
+    pitch_deg = math.degrees(pitch_rad)
+    if abs(pitch_deg) < deadband_deg:
+        return 0.0
+    return max(-max_step_deg, min(max_step_deg, -pitch_deg))
+
+
 def cmd_vel_payload(
     linear_x: float,
     linear_y: float,
     angular_z: float,
     duration_sec: float,
+    pitch_degrees: float = 0.0,
 ) -> dict[str, Any]:
     """Translate one validated planar Twist sample into the Mod protocol."""
     if linear_x == 0.0 and linear_y == 0.0 and angular_z == 0.0:
@@ -1224,7 +1253,7 @@ def cmd_vel_payload(
         "linear_x": linear_x,
         "linear_y": linear_y,
         "yaw_degrees": math.degrees(angular_z * duration_sec),
-        "pitch_degrees": 0.0,
+        "pitch_degrees": float(pitch_degrees) if math.isfinite(pitch_degrees) else 0.0,
         "duration_ms": round(duration_sec * 1000),
     }
 
@@ -1243,6 +1272,7 @@ def receive_cmd_vel(message: Any) -> None:
 
 def cmd_vel_bridge_loop() -> None:
     """Execute short Twist chunks and stop when Nav2 commands become stale."""
+    global latest_observed_pitch_rad
     active = False
     while not cmd_vel_bridge_stop.is_set():
         with cmd_vel_state_lock:
@@ -1254,12 +1284,18 @@ def cmd_vel_bridge_loop() -> None:
             cmd_vel_bridge_stop.wait(0.05)
             continue
         try:
-            client.request(cmd_vel_payload(
+            pitch_delta = cmd_vel_level_pitch_delta_deg(latest_observed_pitch_rad) if moving else 0.0
+            obs = client.request(cmd_vel_payload(
                 linear_x,
                 linear_y,
                 angular_z,
                 cmd_vel_command_duration_sec,
+                pitch_degrees=pitch_delta,
             ))
+            if isinstance(obs, dict) and obs.get("pitch") is not None:
+                p_val = float(obs["pitch"])
+                if math.isfinite(p_val):
+                    latest_observed_pitch_rad = p_val
             active = moving
         except Exception as exc:  # noqa: BLE001
             if not cmd_vel_bridge_stop.is_set():
@@ -1654,6 +1690,128 @@ def start_lidar_stream() -> None:
             daemon=True,
         )
         lidar_stream_thread.start()
+
+
+def configured_rtk(config: dict[str, Any]) -> tuple[bool, str, str, str, float, float, bool]:
+    """Validate optional simulated RTK GNSS streaming settings."""
+    raw_enabled = config.get("rtk_enabled", False)
+    if not isinstance(raw_enabled, bool):
+        raise ValueError("rtk_enabled must be a boolean")
+    topic = str(config.get("rtk_topic") or os.environ.get("RBNX_MINECRAFT_RTK_TOPIC", "/minecraft/gnss/rtk_fix")).strip()
+    status_topic = str(config.get("rtk_status_topic") or os.environ.get("RBNX_MINECRAFT_RTK_STATUS_TOPIC", "/minecraft/gnss/rtk_status")).strip()
+    frame_id = str(config.get("rtk_frame_id") or os.environ.get("RBNX_MINECRAFT_RTK_FRAME_ID", "campus_rtk")).strip()
+    if not topic.startswith("/") or not status_topic.startswith("/"):
+        raise ValueError("rtk_topic and rtk_status_topic must start with '/'")
+    if not frame_id:
+        raise ValueError("rtk_frame_id must be non-empty")
+    hz = float(config.get("rtk_stream_hz", 5.0))
+    if not math.isfinite(hz) or not 0.5 <= hz <= 20.0:
+        raise ValueError("rtk_stream_hz must be finite and within [0.5, 20]")
+    max_range = float(config.get("rtk_max_range_m", 256.0))
+    if not math.isfinite(max_range) or not 10.0 <= max_range <= 4096.0:
+        raise ValueError("rtk_max_range_m must be finite and within [10, 4096]")
+    noise = config.get("rtk_noise_enabled", True)
+    if not isinstance(noise, bool):
+        raise ValueError("rtk_noise_enabled must be a boolean")
+    return raw_enabled, topic, status_topic, frame_id, hz, max_range, noise
+
+
+def publish_rtk_fix(result: dict[str, Any]) -> None:
+    """Publish one simulated RTK fix (PoseWithCovarianceStamped) and status JSON."""
+    fix = result.get("rtkFix")
+    if not isinstance(fix, dict):
+        raise ValueError("rtk_fix response is missing rtkFix")
+    if rtk_status_publisher is not None:
+        from std_msgs.msg import String  # type: ignore
+
+        payload = {
+            "valid": bool(fix.get("valid", False)),
+            "fix_type": str(fix.get("fix_type", "NO_FIX")),
+            "fix_code": int(fix.get("fix_code", 0)),
+            "sigma_xy": float(fix.get("sigma_xy", 999.0)),
+            "sigma_z": float(fix.get("sigma_z", 999.0)),
+            "sky_visibility": float(fix.get("sky_visibility", 0.0)),
+            "num_sats": int(fix.get("num_sats", 0)),
+            "base_id": str(fix.get("base_id", "")),
+            "base_distance_m": float(fix.get("base_distance_m", -1.0)),
+            "station_count": int(fix.get("station_count", 0)),
+            "frame_id": rtk_frame_id,
+            "timestamp": float(fix.get("timestamp", 0.0)),
+        }
+        rtk_status_publisher.publish(String(data=json.dumps(payload, separators=(",", ":"))))
+
+    if rtk_fix_publisher is None or not bool(fix.get("valid", False)):
+        return
+    from geometry_msgs.msg import PoseWithCovarianceStamped  # type: ignore
+
+    ts = float(fix.get("timestamp", 0.0)) if use_sim_time else time.time()
+    sec, nanosec = split_timestamp(ts)
+    msg = PoseWithCovarianceStamped()
+    msg.header.stamp.sec = sec
+    msg.header.stamp.nanosec = nanosec
+    msg.header.frame_id = rtk_frame_id
+    msg.pose.pose.position.x = float(fix["east"])
+    msg.pose.pose.position.y = float(fix["north"])
+    msg.pose.pose.position.z = float(fix["up"])
+    yaw = float(fix.get("yaw", 0.0))
+    msg.pose.pose.orientation.x = 0.0
+    msg.pose.pose.orientation.y = 0.0
+    msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+    msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+    var_xy = max(1e-6, float(fix.get("sigma_xy", 0.05)) ** 2)
+    var_z = max(1e-6, float(fix.get("sigma_z", 0.10)) ** 2)
+    cov = [0.0] * 36
+    cov[0] = var_xy
+    cov[7] = var_xy
+    cov[14] = var_z
+    cov[35] = 0.05
+    msg.pose.covariance = cov
+    rtk_fix_publisher.publish(msg)
+
+
+def rtk_stream_loop() -> None:
+    """Poll the Forge client for simulated onboard RTK GNSS fixes."""
+    interval = 1.0 / max(0.5, rtk_stream_hz)
+    while not rtk_stream_stop.is_set():
+        started = time.monotonic()
+        try:
+            result = client.request({
+                "cmd": "rtk_fix",
+                "max_range_m": rtk_max_range_m,
+                "noise_enabled": rtk_noise_enabled,
+            })
+            publish_rtk_fix(result)
+        except Exception as exc:  # noqa: BLE001
+            log_stream_error("rtk", exc)
+        rtk_stream_stop.wait(max(0.0, interval - (time.monotonic() - started)))
+
+
+def start_rtk_stream() -> None:
+    """Start the onboard RTK GNSS publisher worker when enabled."""
+    global rtk_stream_thread
+    if not rtk_enabled:
+        return
+    with rtk_worker_lock:
+        if rtk_stream_thread is not None and rtk_stream_thread.is_alive():
+            return
+        rtk_stream_stop.clear()
+        rtk_stream_thread = threading.Thread(
+            target=rtk_stream_loop,
+            name="minecraft-rtk-stream",
+            daemon=True,
+        )
+        rtk_stream_thread.start()
+
+
+def stop_rtk_stream() -> bool:
+    """Stop the onboard RTK GNSS worker cleanly."""
+    with rtk_worker_lock:
+        rtk_stream_stop.set()
+        worker = rtk_stream_thread
+        if worker is None or worker is threading.current_thread():
+            return True
+        worker.join(timeout=client.timeout + 1.0)
+        return not worker.is_alive()
 
 
 def start_cmd_vel_bridge() -> None:
@@ -2591,6 +2749,149 @@ def inspect_container_mcp(
     )
 
 
+def _odom_point_to_block_pos(odom_x: Any, odom_y: Any, odom_z: Any) -> tuple[int, int, int]:
+    """Convert a sensor-estimated minecraft_odom ENU point (east, north, up) to BlockPos (x, y, z)."""
+    ox, oy, oz = float(odom_x), float(odom_y), float(odom_z)
+    if not (math.isfinite(ox) and math.isfinite(oy) and math.isfinite(oz)):
+        raise ValueError("odom_x, odom_y, odom_z must be finite numbers")
+    return math.floor(ox), math.floor(oz), math.floor(-oy)
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/aim_at_odom_point")
+def aim_at_odom_point_mcp(
+    req: minecraft_mcp.AimAtOdomPoint_Request,
+) -> minecraft_mcp.AimAtOdomPoint_Response:
+    """Aim the live crosshair at a pure-sensor 3D point in minecraft_odom and verify block match."""
+    x, y, z = _odom_point_to_block_pos(req.odom_x, req.odom_y, req.odom_z)
+    expected = registry_name(req.expected_block, "expected_block")
+    result = action_request({
+        "cmd": "aim_at_block",
+        "x": x,
+        "y": y,
+        "z": z,
+        "expected_block": expected,
+    })
+    aimed = result.get("aimed")
+    actual = registry_name(result.get("actual_block"), "actual_block")
+    hit_face = result.get("hit_face")
+    if aimed is not True or actual != expected:
+        raise RuntimeError(
+            f"Minecraft Mod did not confirm aiming at {expected} (actual={actual!r}, aimed={aimed!r})"
+        )
+    if not isinstance(hit_face, str) or not hit_face:
+        raise RuntimeError("Minecraft Mod returned an invalid hit_face")
+    return minecraft_mcp.AimAtOdomPoint_Response(
+        aimed=True,
+        actual_block=actual,
+        hit_face=hit_face,
+        final_yaw_deg=float(result.get("final_yaw_deg", 0.0)),
+        final_pitch_deg=float(result.get("final_pitch_deg", 0.0)),
+    )
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/inspect_container_at_point")
+def inspect_container_at_point_mcp(
+    req: minecraft_mcp.InspectContainerAtPoint_Request,
+) -> minecraft_mcp.InspectContainerAtPoint_Response:
+    """Open a reachable chest at a pure-sensor minecraft_odom point and list every slot."""
+    x, y, z = _odom_point_to_block_pos(req.odom_x, req.odom_y, req.odom_z)
+    result = action_request({"cmd": "inspect_container", "x": x, "y": y, "z": z})
+    container_type = registry_name(result.get("container_type"), "container_type")
+    if container_type not in {"minecraft:chest", "minecraft:trapped_chest"}:
+        raise RuntimeError("Minecraft Mod returned an unsupported container type")
+    slot_count = exact_int(result.get("slot_count"), "slot_count", 1, 4_294_967_295)
+    raw_slots = result.get("slots")
+    if not isinstance(raw_slots, list) or len(raw_slots) != slot_count:
+        raise RuntimeError("Minecraft Mod container slot count is inconsistent")
+    slots = []
+    for expected, raw in enumerate(raw_slots):
+        if not isinstance(raw, dict):
+            raise RuntimeError("Minecraft Mod container slot is not an object")
+        slot = exact_int(raw.get("slot"), "slot", 0, slot_count - 1)
+        if slot != expected:
+            raise RuntimeError(f"Minecraft Mod container returned unexpected slot {slot}")
+        item = registry_name(raw.get("item"), "item")
+        count = exact_int(raw.get("count"), "count", 0, 4_294_967_295)
+        if (item == "minecraft:air") != (count == 0):
+            raise RuntimeError("Minecraft Mod container empty slot is inconsistent")
+        slots.append(minecraft_mcp.InventorySlot(slot=slot, item=item, count=count))
+    return minecraft_mcp.InspectContainerAtPoint_Response(
+        container_type=container_type,
+        slot_count=slot_count,
+        slots=slots,
+    )
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/withdraw_item_at_point")
+def withdraw_item_at_point_mcp(
+    req: minecraft_mcp.WithdrawItemAtPoint_Request,
+) -> minecraft_mcp.WithdrawItemAtPoint_Response:
+    """Withdraw exact item count from a chest located at a pure-sensor minecraft_odom point."""
+    item = registry_name(req.item, "item")
+    count = exact_int(req.count, "count", 1, 2_147_483_647)
+    x, y, z = _odom_point_to_block_pos(req.odom_x, req.odom_y, req.odom_z)
+    result = action_request({
+        "cmd": "withdraw_item",
+        "x": x,
+        "y": y,
+        "z": z,
+        "item": item,
+        "count": count,
+    })
+    fields = {
+        name: exact_int(result.get(name), name, 0, 4_294_967_295)
+        for name in (
+            "transferred_count",
+            "player_count_before",
+            "player_count_after",
+            "container_count_before",
+            "container_count_after",
+        )
+    }
+    if fields["transferred_count"] != count:
+        raise RuntimeError("Minecraft Mod did not verify the requested transferred item count")
+    if fields["player_count_after"] != fields["player_count_before"] + count:
+        raise RuntimeError("Minecraft Mod player inventory counts are inconsistent")
+    if fields["container_count_after"] != fields["container_count_before"] - count:
+        raise RuntimeError("Minecraft Mod container counts are inconsistent")
+    return minecraft_mcp.WithdrawItemAtPoint_Response(**fields)
+
+
+@minecraft_actions.mcp("robonix/primitive/minecraft/deposit_item_at_point")
+def deposit_item_at_point_mcp(
+    req: minecraft_mcp.DepositItemAtPoint_Request,
+) -> minecraft_mcp.DepositItemAtPoint_Response:
+    """Deposit exact item count into a chest located at a pure-sensor minecraft_odom point."""
+    item = registry_name(req.item, "item")
+    count = exact_int(req.count, "count", 1, 2_147_483_647)
+    x, y, z = _odom_point_to_block_pos(req.odom_x, req.odom_y, req.odom_z)
+    result = action_request({
+        "cmd": "deposit_item",
+        "x": x,
+        "y": y,
+        "z": z,
+        "item": item,
+        "count": count,
+    })
+    fields = {
+        name: exact_int(result.get(name), name, 0, 4_294_967_295)
+        for name in (
+            "transferred_count",
+            "player_count_before",
+            "player_count_after",
+            "container_count_before",
+            "container_count_after",
+        )
+    }
+    if fields["transferred_count"] != count:
+        raise RuntimeError("Minecraft Mod did not verify the requested transferred item count")
+    if fields["player_count_after"] != fields["player_count_before"] - count:
+        raise RuntimeError("Minecraft Mod player inventory counts are inconsistent")
+    if fields["container_count_after"] != fields["container_count_before"] + count:
+        raise RuntimeError("Minecraft Mod container counts are inconsistent")
+    return minecraft_mcp.DepositItemAtPoint_Response(**fields)
+
+
 @minecraft_actions.mcp("robonix/primitive/minecraft/fill_water_bottles")
 def fill_water_bottles_mcp(
     req: minecraft_mcp.FillWaterBottlesV2_Request,
@@ -2784,7 +3085,10 @@ def initialize_camera(config: dict[str, Any]):
     global rgb_publisher, depth_publisher, extrinsics_publisher, intrinsics_publisher
     global objects_publisher, lidar_publisher, clock_publisher, use_sim_time
     global lidar_rings_publisher, lidar_low_publisher, lidar_high_publisher
+    global rtk_fix_publisher, rtk_status_publisher
     global lidar_rings
+    global rtk_enabled, rtk_topic, rtk_status_topic, rtk_frame_id
+    global rtk_stream_hz, rtk_max_range_m, rtk_noise_enabled
     global raw_rgb_publisher, raw_depth_publisher, raw_intrinsics_publisher
     global raw_lidar_publisher, clock_diagnostics_publisher, clock_emulator
     global latest_lidar_clock_sample, latest_lidar_clock_update_monotonic_ns
@@ -2820,7 +3124,7 @@ def initialize_camera(config: dict[str, Any]):
     if any(publisher is not None for publisher in camera_publishers):
         return Err("camera publisher initialization is incomplete; restart the provider")
     try:
-        from geometry_msgs.msg import TransformStamped  # type: ignore
+        from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped  # type: ignore
         from sensor_msgs.msg import CameraInfo, Image as RosImage, LaserScan, PointCloud2  # type: ignore
         from std_msgs.msg import String  # type: ignore
 
@@ -2844,6 +3148,15 @@ def initialize_camera(config: dict[str, Any]):
         lidar_ray_count = configured_lidar_ray_count(config)
         lidar_range_max = configured_lidar_range(config)
         lidar_rings = configured_lidar_rings(config)
+        (
+            rtk_enabled,
+            rtk_topic,
+            rtk_status_topic,
+            rtk_frame_id,
+            rtk_stream_hz,
+            rtk_max_range_m,
+            rtk_noise_enabled,
+        ) = configured_rtk(config)
         (
             route_inspection_half_width_m,
             route_inspection_sample_spacing_m,
@@ -2968,6 +3281,19 @@ def initialize_camera(config: dict[str, Any]):
                     qos="best_effort",
                     time_descriptor=lidar_time_descriptor,
                 )
+        if rtk_enabled:
+            rtk_fix_publisher = minecraft_mod.create_publisher(
+                "robonix/primitive/gnss/rtk_fix",
+                topic=rtk_topic,
+                msg_type=PoseWithCovarianceStamped,
+                qos="best_effort",
+            )
+            rtk_status_publisher = minecraft_mod.create_publisher(
+                "robonix/primitive/gnss/rtk_status",
+                topic=rtk_status_topic,
+                msg_type=String,
+                qos="reliable",
+            )
         if clock_emulator.enabled:
             node = RosBackend.get().node
             raw_rgb_publisher = node.create_publisher(RosImage, raw_rgb_topic, 10)
@@ -3023,9 +3349,11 @@ def activate_camera():
                 return chassis_result
             start_camera_stream()
             start_lidar_stream()
+            start_rtk_stream()
         except Exception as exc:  # noqa: BLE001
             camera_stopped = stop_camera_stream()
             lidar_stopped = stop_lidar_stream()
+            rtk_stopped = stop_rtk_stream()
             clock_stopped = stop_clock_stream()
             rollback = deactivate_chassis()
             detail = f"camera stream activation failed: {exc}"
@@ -3033,6 +3361,8 @@ def activate_camera():
                 detail += "; camera worker rollback timed out"
             if not lidar_stopped:
                 detail += "; lidar worker rollback timed out"
+            if not rtk_stopped:
+                detail += "; rtk worker rollback timed out"
             if not clock_stopped:
                 detail += "; clock worker rollback timed out"
             if isinstance(rollback, Err):
@@ -3047,12 +3377,15 @@ def deactivate_camera():
     with camera_lifecycle_lock:
         camera_stopped = stop_camera_stream()
         lidar_stopped = stop_lidar_stream()
+        rtk_stopped = stop_rtk_stream()
         clock_stopped = stop_clock_stream()
         chassis_result = deactivate_chassis()
     if not camera_stopped:
         return Err("camera stream worker did not stop before timeout")
     if not lidar_stopped:
         return Err("lidar stream worker did not stop before timeout")
+    if not rtk_stopped:
+        return Err("rtk stream worker did not stop before timeout")
     if not clock_stopped:
         return Err("clock stream worker did not stop before timeout")
     if isinstance(chassis_result, Err):
@@ -3066,12 +3399,15 @@ def shutdown_camera():
     with camera_lifecycle_lock:
         camera_stopped = stop_camera_stream()
         lidar_stopped = stop_lidar_stream()
+        rtk_stopped = stop_rtk_stream()
         clock_stopped = stop_clock_stream()
         chassis_result = shutdown_chassis()
     if not camera_stopped:
         return Err("camera stream worker did not stop before timeout")
     if not lidar_stopped:
         return Err("lidar stream worker did not stop before timeout")
+    if not rtk_stopped:
+        return Err("rtk stream worker did not stop before timeout")
     if not clock_stopped:
         return Err("clock stream worker did not stop before timeout")
     if isinstance(chassis_result, Err):

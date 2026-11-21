@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/minecraft/deposit_item_at_point"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/DepositItemAtPoint.srv"
+description = "Deposit an exact count of a registered item from player inventory into a reachable chest at a sensor-estimated 3D point in minecraft_odom (after aiming)."
+
+[mode]
+type = "rpc"

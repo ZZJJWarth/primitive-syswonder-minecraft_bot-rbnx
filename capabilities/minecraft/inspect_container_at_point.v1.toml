@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/minecraft/inspect_container_at_point"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/InspectContainerAtPoint.srv"
+description = "Open a reachable chest located at a sensor-estimated 3D point in minecraft_odom (after aiming) and return every container slot with item ID and count."
+
+[mode]
+type = "rpc"

@@ -1,0 +1,10 @@
+# Simulated onboard RTK/GNSS link status JSON (fix_type, num_sats,
+# sky_visibility, base_id, base_distance_m, station_count, valid).
+[contract]
+id      = "robonix/primitive/gnss/rtk_status"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/std_msgs/msg/String.msg"
+
+[mode]
+type = "topic_out"

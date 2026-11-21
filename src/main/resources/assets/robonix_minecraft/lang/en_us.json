@@ -1,3 +1,8 @@
 {
-  "block.robonix_minecraft.elevator_controller": "Robonix Elevator Controller"
+  "itemGroup.robonix_minecraft.robonix": "Robonix",
+  "block.robonix_minecraft.elevator_controller": "Robonix Elevator Controller",
+  "block.robonix_minecraft.rtk_base_station": "Robonix RTK Base Station",
+  "item.robonix_minecraft.rtk_mapper": "Robonix RTK Surveyor",
+  "item.robonix_minecraft.indoor_mapper": "Robonix Indoor Odometry Mapper",
+  "block.robonix_minecraft.fiducial_marker": "Robonix Visual Fiducial Marker"
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MulanPSL-2.0
 package com.robonix.minecraftmod;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.io.*;
@@ -9,7 +10,13 @@ import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.concurrent.*;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 
 /** Dedicated-server loopback control. No client classes, player session or arbitrary commands. */
 public final class ServerControllerEndpoint implements AutoCloseable {
@@ -91,6 +98,12 @@ public final class ServerControllerEndpoint implements AutoCloseable {
 
     private CompletableFuture<JsonObject> dispatch(JsonObject json) {
         String cmd = string(json, "cmd");
+        if (cmd.equals("rtk_stations_list")) {
+            return dispatchRtkStations(json);
+        }
+        if (cmd.equals("rtk_mapper_poll")) {
+            return dispatchRtkMapperPoll(json);
+        }
         if (!cmd.equals("elevator_controller_get") && !cmd.equals("elevator_controller_set")) {
             throw new IllegalArgumentException("unsupported server command: " + cmd);
         }
@@ -117,6 +130,105 @@ public final class ServerControllerEndpoint implements AutoCloseable {
                 var player = playerName == null ? null : server.getPlayerList().getPlayerByName(playerName);
                 result.complete(ServerControllerAccess.execute(server, request, player, command));
             } catch (Exception exception) { result.completeExceptionally(exception); }
+        });
+        return result;
+    }
+
+    private CompletableFuture<JsonObject> dispatchRtkStations(JsonObject json) {
+        String dimension = json.has("dimension") ? string(json, "dimension") : "minecraft:overworld";
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        result.orTimeout(9, TimeUnit.SECONDS);
+        server.execute(() -> {
+            if (closed || result.isDone()) {
+                result.completeExceptionally(new IllegalStateException("server endpoint stopped"));
+                return;
+            }
+            try {
+                ResourceKey<Level> key = ResourceKey.create(Registries.DIMENSION, new ResourceLocation(dimension));
+                ServerLevel level = server.getLevel(key);
+                if (level == null) {
+                    throw new IllegalArgumentException("unknown dimension: " + dimension);
+                }
+                var data = RtkStationSavedData.get(level);
+                if (data.pruneMissing(level)) {
+                    RtkNetwork.broadcastStations(level);
+                }
+                var stations = data.listStations();
+                JsonObject out = new JsonObject();
+                out.addProperty("dimension", dimension);
+                out.add("stations", RtkPhysics.stationsToJson(stations));
+                result.complete(out);
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
+    }
+
+    private CompletableFuture<JsonObject> dispatchRtkMapperPoll(JsonObject json) {
+        String dimension = json.has("dimension") ? string(json, "dimension") : "minecraft:overworld";
+        double maxRangeM = json.has("max_range_m") ? json.get("max_range_m").getAsDouble() : 256.0;
+        boolean noiseEnabled = !json.has("noise_enabled") || json.get("noise_enabled").getAsBoolean();
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        result.orTimeout(9, TimeUnit.SECONDS);
+        server.execute(() -> {
+            if (closed || result.isDone()) {
+                result.completeExceptionally(new IllegalStateException("server endpoint stopped"));
+                return;
+            }
+            try {
+                ResourceKey<Level> key = ResourceKey.create(Registries.DIMENSION, new ResourceLocation(dimension));
+                ServerLevel level = server.getLevel(key);
+                if (level == null) {
+                    throw new IllegalArgumentException("unknown dimension: " + dimension);
+                }
+                var data = RtkStationSavedData.get(level);
+                if (data.pruneMissing(level)) {
+                    RtkNetwork.broadcastStations(level);
+                }
+                var stations = data.listStations();
+                double ts = level.getGameTime() / 20.0;
+                JsonArray holders = new JsonArray();
+                JsonArray indoorHolders = new JsonArray();
+                for (ServerPlayer player : level.players()) {
+                    boolean holdingRtk = player.getMainHandItem().is(RtkRegistry.RTK_MAPPER.get())
+                            || player.getOffhandItem().is(RtkRegistry.RTK_MAPPER.get());
+                    if (holdingRtk) {
+                        var fix = RtkPhysics.computeFix(level, player, stations, maxRangeM, noiseEnabled, ts);
+                        JsonObject entry = new JsonObject();
+                        entry.addProperty("player", player.getGameProfile().getName());
+                        entry.addProperty("dimension", dimension);
+                        entry.add("fix", fix.toJson());
+                        holders.add(entry);
+                    }
+                    boolean holdingIndoor = player.getMainHandItem().is(RtkRegistry.INDOOR_MAPPER.get())
+                            || player.getOffhandItem().is(RtkRegistry.INDOOR_MAPPER.get());
+                    if (holdingIndoor) {
+                        var odom = IndoorMapperTracker.computePose(player, ts);
+                        JsonObject entry = new JsonObject();
+                        entry.addProperty("player", player.getGameProfile().getName());
+                        entry.addProperty("dimension", dimension);
+                        entry.add("pose", odom.toJson());
+                        indoorHolders.add(entry);
+                    }
+                }
+                JsonObject out = new JsonObject();
+                out.addProperty("dimension", dimension);
+                out.add("stations", RtkPhysics.stationsToJson(stations));
+                out.add("holders", holders);
+                out.add("indoor_holders", indoorHolders);
+                var mark = RtkMapperTracker.latestMark();
+                if (mark != null && mark.dimension().equals(dimension)) {
+                    out.add("last_mark", mark.toJson());
+                }
+                var indoorMark = IndoorMapperTracker.latestMark();
+                if (indoorMark != null && indoorMark.dimension().equals(dimension)) {
+                    out.add("last_indoor_mark", indoorMark.toJson());
+                }
+                result.complete(out);
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
         });
         return result;
     }

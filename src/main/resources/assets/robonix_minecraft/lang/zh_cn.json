@@ -1,3 +1,8 @@
 {
-  "block.robonix_minecraft.elevator_controller": "Robonix 电梯控制器"
+  "itemGroup.robonix_minecraft.robonix": "Robonix 专用",
+  "block.robonix_minecraft.elevator_controller": "Robonix 电梯控制器",
+  "block.robonix_minecraft.rtk_base_station": "Robonix RTK 基准站",
+  "item.robonix_minecraft.rtk_mapper": "Robonix RTK 测绘仪",
+  "item.robonix_minecraft.indoor_mapper": "Robonix 室内建图仪",
+  "block.robonix_minecraft.fiducial_marker": "Robonix 视觉定位标牌"
 }

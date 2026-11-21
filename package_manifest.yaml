@@ -33,6 +33,12 @@ capabilities:
     transport: ros2
   - name: robonix/primitive/lidar/lidar_high
     transport: ros2
+  - name: robonix/primitive/gnss/rtk_fix
+    transport: ros2
+    path: capabilities/gnss/rtk_fix.v1.toml
+  - name: robonix/primitive/gnss/rtk_status
+    transport: ros2
+    path: capabilities/gnss/rtk_status.v1.toml
   - name: robonix/primitive/clock/get_status
     transport: grpc
   - name: robonix/primitive/clock/watch_status
@@ -80,6 +86,18 @@ capabilities:
   - name: robonix/primitive/minecraft/inspect_container
     transport: mcp
     path: capabilities/minecraft/inspect_container.v2.toml
+  - name: robonix/primitive/minecraft/aim_at_odom_point
+    transport: mcp
+    path: capabilities/minecraft/aim_at_odom_point.v1.toml
+  - name: robonix/primitive/minecraft/inspect_container_at_point
+    transport: mcp
+    path: capabilities/minecraft/inspect_container_at_point.v1.toml
+  - name: robonix/primitive/minecraft/withdraw_item_at_point
+    transport: mcp
+    path: capabilities/minecraft/withdraw_item_at_point.v1.toml
+  - name: robonix/primitive/minecraft/deposit_item_at_point
+    transport: mcp
+    path: capabilities/minecraft/deposit_item_at_point.v1.toml
   - name: robonix/primitive/minecraft/fill_water_bottles
     transport: mcp
     path: capabilities/minecraft/fill_water_bottles.v2.toml

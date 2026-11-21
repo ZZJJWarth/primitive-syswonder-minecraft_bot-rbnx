@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "robonix_minecraft:block/rtk_base_station"
+    }
+  }
+}

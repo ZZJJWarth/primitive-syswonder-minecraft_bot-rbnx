@@ -1,0 +1,484 @@
+{
+  "variants": {
+    "facing=north,marker_id=0": {
+      "model": "robonix_minecraft:block/fiducial_marker_0"
+    },
+    "facing=east,marker_id=0": {
+      "model": "robonix_minecraft:block/fiducial_marker_0",
+      "y": 90
+    },
+    "facing=south,marker_id=0": {
+      "model": "robonix_minecraft:block/fiducial_marker_0",
+      "y": 180
+    },
+    "facing=west,marker_id=0": {
+      "model": "robonix_minecraft:block/fiducial_marker_0",
+      "y": 270
+    },
+    "facing=north,marker_id=1": {
+      "model": "robonix_minecraft:block/fiducial_marker_1"
+    },
+    "facing=east,marker_id=1": {
+      "model": "robonix_minecraft:block/fiducial_marker_1",
+      "y": 90
+    },
+    "facing=south,marker_id=1": {
+      "model": "robonix_minecraft:block/fiducial_marker_1",
+      "y": 180
+    },
+    "facing=west,marker_id=1": {
+      "model": "robonix_minecraft:block/fiducial_marker_1",
+      "y": 270
+    },
+    "facing=north,marker_id=2": {
+      "model": "robonix_minecraft:block/fiducial_marker_2"
+    },
+    "facing=east,marker_id=2": {
+      "model": "robonix_minecraft:block/fiducial_marker_2",
+      "y": 90
+    },
+    "facing=south,marker_id=2": {
+      "model": "robonix_minecraft:block/fiducial_marker_2",
+      "y": 180
+    },
+    "facing=west,marker_id=2": {
+      "model": "robonix_minecraft:block/fiducial_marker_2",
+      "y": 270
+    },
+    "facing=north,marker_id=3": {
+      "model": "robonix_minecraft:block/fiducial_marker_3"
+    },
+    "facing=east,marker_id=3": {
+      "model": "robonix_minecraft:block/fiducial_marker_3",
+      "y": 90
+    },
+    "facing=south,marker_id=3": {
+      "model": "robonix_minecraft:block/fiducial_marker_3",
+      "y": 180
+    },
+    "facing=west,marker_id=3": {
+      "model": "robonix_minecraft:block/fiducial_marker_3",
+      "y": 270
+    },
+    "facing=north,marker_id=4": {
+      "model": "robonix_minecraft:block/fiducial_marker_4"
+    },
+    "facing=east,marker_id=4": {
+      "model": "robonix_minecraft:block/fiducial_marker_4",
+      "y": 90
+    },
+    "facing=south,marker_id=4": {
+      "model": "robonix_minecraft:block/fiducial_marker_4",
+      "y": 180
+    },
+    "facing=west,marker_id=4": {
+      "model": "robonix_minecraft:block/fiducial_marker_4",
+      "y": 270
+    },
+    "facing=north,marker_id=5": {
+      "model": "robonix_minecraft:block/fiducial_marker_5"
+    },
+    "facing=east,marker_id=5": {
+      "model": "robonix_minecraft:block/fiducial_marker_5",
+      "y": 90
+    },
+    "facing=south,marker_id=5": {
+      "model": "robonix_minecraft:block/fiducial_marker_5",
+      "y": 180
+    },
+    "facing=west,marker_id=5": {
+      "model": "robonix_minecraft:block/fiducial_marker_5",
+      "y": 270
+    },
+    "facing=north,marker_id=6": {
+      "model": "robonix_minecraft:block/fiducial_marker_6"
+    },
+    "facing=east,marker_id=6": {
+      "model": "robonix_minecraft:block/fiducial_marker_6",
+      "y": 90
+    },
+    "facing=south,marker_id=6": {
+      "model": "robonix_minecraft:block/fiducial_marker_6",
+      "y": 180
+    },
+    "facing=west,marker_id=6": {
+      "model": "robonix_minecraft:block/fiducial_marker_6",
+      "y": 270
+    },
+    "facing=north,marker_id=7": {
+      "model": "robonix_minecraft:block/fiducial_marker_7"
+    },
+    "facing=east,marker_id=7": {
+      "model": "robonix_minecraft:block/fiducial_marker_7",
+      "y": 90
+    },
+    "facing=south,marker_id=7": {
+      "model": "robonix_minecraft:block/fiducial_marker_7",
+      "y": 180
+    },
+    "facing=west,marker_id=7": {
+      "model": "robonix_minecraft:block/fiducial_marker_7",
+      "y": 270
+    },
+    "facing=north,marker_id=8": {
+      "model": "robonix_minecraft:block/fiducial_marker_8"
+    },
+    "facing=east,marker_id=8": {
+      "model": "robonix_minecraft:block/fiducial_marker_8",
+      "y": 90
+    },
+    "facing=south,marker_id=8": {
+      "model": "robonix_minecraft:block/fiducial_marker_8",
+      "y": 180
+    },
+    "facing=west,marker_id=8": {
+      "model": "robonix_minecraft:block/fiducial_marker_8",
+      "y": 270
+    },
+    "facing=north,marker_id=9": {
+      "model": "robonix_minecraft:block/fiducial_marker_9"
+    },
+    "facing=east,marker_id=9": {
+      "model": "robonix_minecraft:block/fiducial_marker_9",
+      "y": 90
+    },
+    "facing=south,marker_id=9": {
+      "model": "robonix_minecraft:block/fiducial_marker_9",
+      "y": 180
+    },
+    "facing=west,marker_id=9": {
+      "model": "robonix_minecraft:block/fiducial_marker_9",
+      "y": 270
+    },
+    "facing=north,marker_id=10": {
+      "model": "robonix_minecraft:block/fiducial_marker_10"
+    },
+    "facing=east,marker_id=10": {
+      "model": "robonix_minecraft:block/fiducial_marker_10",
+      "y": 90
+    },
+    "facing=south,marker_id=10": {
+      "model": "robonix_minecraft:block/fiducial_marker_10",
+      "y": 180
+    },
+    "facing=west,marker_id=10": {
+      "model": "robonix_minecraft:block/fiducial_marker_10",
+      "y": 270
+    },
+    "facing=north,marker_id=11": {
+      "model": "robonix_minecraft:block/fiducial_marker_11"
+    },
+    "facing=east,marker_id=11": {
+      "model": "robonix_minecraft:block/fiducial_marker_11",
+      "y": 90
+    },
+    "facing=south,marker_id=11": {
+      "model": "robonix_minecraft:block/fiducial_marker_11",
+      "y": 180
+    },
+    "facing=west,marker_id=11": {
+      "model": "robonix_minecraft:block/fiducial_marker_11",
+      "y": 270
+    },
+    "facing=north,marker_id=12": {
+      "model": "robonix_minecraft:block/fiducial_marker_12"
+    },
+    "facing=east,marker_id=12": {
+      "model": "robonix_minecraft:block/fiducial_marker_12",
+      "y": 90
+    },
+    "facing=south,marker_id=12": {
+      "model": "robonix_minecraft:block/fiducial_marker_12",
+      "y": 180
+    },
+    "facing=west,marker_id=12": {
+      "model": "robonix_minecraft:block/fiducial_marker_12",
+      "y": 270
+    },
+    "facing=north,marker_id=13": {
+      "model": "robonix_minecraft:block/fiducial_marker_13"
+    },
+    "facing=east,marker_id=13": {
+      "model": "robonix_minecraft:block/fiducial_marker_13",
+      "y": 90
+    },
+    "facing=south,marker_id=13": {
+      "model": "robonix_minecraft:block/fiducial_marker_13",
+      "y": 180
+    },
+    "facing=west,marker_id=13": {
+      "model": "robonix_minecraft:block/fiducial_marker_13",
+      "y": 270
+    },
+    "facing=north,marker_id=14": {
+      "model": "robonix_minecraft:block/fiducial_marker_14"
+    },
+    "facing=east,marker_id=14": {
+      "model": "robonix_minecraft:block/fiducial_marker_14",
+      "y": 90
+    },
+    "facing=south,marker_id=14": {
+      "model": "robonix_minecraft:block/fiducial_marker_14",
+      "y": 180
+    },
+    "facing=west,marker_id=14": {
+      "model": "robonix_minecraft:block/fiducial_marker_14",
+      "y": 270
+    },
+    "facing=north,marker_id=15": {
+      "model": "robonix_minecraft:block/fiducial_marker_15"
+    },
+    "facing=east,marker_id=15": {
+      "model": "robonix_minecraft:block/fiducial_marker_15",
+      "y": 90
+    },
+    "facing=south,marker_id=15": {
+      "model": "robonix_minecraft:block/fiducial_marker_15",
+      "y": 180
+    },
+    "facing=west,marker_id=15": {
+      "model": "robonix_minecraft:block/fiducial_marker_15",
+      "y": 270
+    },
+    "facing=north,marker_id=16": {
+      "model": "robonix_minecraft:block/fiducial_marker_16"
+    },
+    "facing=east,marker_id=16": {
+      "model": "robonix_minecraft:block/fiducial_marker_16",
+      "y": 90
+    },
+    "facing=south,marker_id=16": {
+      "model": "robonix_minecraft:block/fiducial_marker_16",
+      "y": 180
+    },
+    "facing=west,marker_id=16": {
+      "model": "robonix_minecraft:block/fiducial_marker_16",
+      "y": 270
+    },
+    "facing=north,marker_id=17": {
+      "model": "robonix_minecraft:block/fiducial_marker_17"
+    },
+    "facing=east,marker_id=17": {
+      "model": "robonix_minecraft:block/fiducial_marker_17",
+      "y": 90
+    },
+    "facing=south,marker_id=17": {
+      "model": "robonix_minecraft:block/fiducial_marker_17",
+      "y": 180
+    },
+    "facing=west,marker_id=17": {
+      "model": "robonix_minecraft:block/fiducial_marker_17",
+      "y": 270
+    },
+    "facing=north,marker_id=18": {
+      "model": "robonix_minecraft:block/fiducial_marker_18"
+    },
+    "facing=east,marker_id=18": {
+      "model": "robonix_minecraft:block/fiducial_marker_18",
+      "y": 90
+    },
+    "facing=south,marker_id=18": {
+      "model": "robonix_minecraft:block/fiducial_marker_18",
+      "y": 180
+    },
+    "facing=west,marker_id=18": {
+      "model": "robonix_minecraft:block/fiducial_marker_18",
+      "y": 270
+    },
+    "facing=north,marker_id=19": {
+      "model": "robonix_minecraft:block/fiducial_marker_19"
+    },
+    "facing=east,marker_id=19": {
+      "model": "robonix_minecraft:block/fiducial_marker_19",
+      "y": 90
+    },
+    "facing=south,marker_id=19": {
+      "model": "robonix_minecraft:block/fiducial_marker_19",
+      "y": 180
+    },
+    "facing=west,marker_id=19": {
+      "model": "robonix_minecraft:block/fiducial_marker_19",
+      "y": 270
+    },
+    "facing=north,marker_id=20": {
+      "model": "robonix_minecraft:block/fiducial_marker_20"
+    },
+    "facing=east,marker_id=20": {
+      "model": "robonix_minecraft:block/fiducial_marker_20",
+      "y": 90
+    },
+    "facing=south,marker_id=20": {
+      "model": "robonix_minecraft:block/fiducial_marker_20",
+      "y": 180
+    },
+    "facing=west,marker_id=20": {
+      "model": "robonix_minecraft:block/fiducial_marker_20",
+      "y": 270
+    },
+    "facing=north,marker_id=21": {
+      "model": "robonix_minecraft:block/fiducial_marker_21"
+    },
+    "facing=east,marker_id=21": {
+      "model": "robonix_minecraft:block/fiducial_marker_21",
+      "y": 90
+    },
+    "facing=south,marker_id=21": {
+      "model": "robonix_minecraft:block/fiducial_marker_21",
+      "y": 180
+    },
+    "facing=west,marker_id=21": {
+      "model": "robonix_minecraft:block/fiducial_marker_21",
+      "y": 270
+    },
+    "facing=north,marker_id=22": {
+      "model": "robonix_minecraft:block/fiducial_marker_22"
+    },
+    "facing=east,marker_id=22": {
+      "model": "robonix_minecraft:block/fiducial_marker_22",
+      "y": 90
+    },
+    "facing=south,marker_id=22": {
+      "model": "robonix_minecraft:block/fiducial_marker_22",
+      "y": 180
+    },
+    "facing=west,marker_id=22": {
+      "model": "robonix_minecraft:block/fiducial_marker_22",
+      "y": 270
+    },
+    "facing=north,marker_id=23": {
+      "model": "robonix_minecraft:block/fiducial_marker_23"
+    },
+    "facing=east,marker_id=23": {
+      "model": "robonix_minecraft:block/fiducial_marker_23",
+      "y": 90
+    },
+    "facing=south,marker_id=23": {
+      "model": "robonix_minecraft:block/fiducial_marker_23",
+      "y": 180
+    },
+    "facing=west,marker_id=23": {
+      "model": "robonix_minecraft:block/fiducial_marker_23",
+      "y": 270
+    },
+    "facing=north,marker_id=24": {
+      "model": "robonix_minecraft:block/fiducial_marker_24"
+    },
+    "facing=east,marker_id=24": {
+      "model": "robonix_minecraft:block/fiducial_marker_24",
+      "y": 90
+    },
+    "facing=south,marker_id=24": {
+      "model": "robonix_minecraft:block/fiducial_marker_24",
+      "y": 180
+    },
+    "facing=west,marker_id=24": {
+      "model": "robonix_minecraft:block/fiducial_marker_24",
+      "y": 270
+    },
+    "facing=north,marker_id=25": {
+      "model": "robonix_minecraft:block/fiducial_marker_25"
+    },
+    "facing=east,marker_id=25": {
+      "model": "robonix_minecraft:block/fiducial_marker_25",
+      "y": 90
+    },
+    "facing=south,marker_id=25": {
+      "model": "robonix_minecraft:block/fiducial_marker_25",
+      "y": 180
+    },
+    "facing=west,marker_id=25": {
+      "model": "robonix_minecraft:block/fiducial_marker_25",
+      "y": 270
+    },
+    "facing=north,marker_id=26": {
+      "model": "robonix_minecraft:block/fiducial_marker_26"
+    },
+    "facing=east,marker_id=26": {
+      "model": "robonix_minecraft:block/fiducial_marker_26",
+      "y": 90
+    },
+    "facing=south,marker_id=26": {
+      "model": "robonix_minecraft:block/fiducial_marker_26",
+      "y": 180
+    },
+    "facing=west,marker_id=26": {
+      "model": "robonix_minecraft:block/fiducial_marker_26",
+      "y": 270
+    },
+    "facing=north,marker_id=27": {
+      "model": "robonix_minecraft:block/fiducial_marker_27"
+    },
+    "facing=east,marker_id=27": {
+      "model": "robonix_minecraft:block/fiducial_marker_27",
+      "y": 90
+    },
+    "facing=south,marker_id=27": {
+      "model": "robonix_minecraft:block/fiducial_marker_27",
+      "y": 180
+    },
+    "facing=west,marker_id=27": {
+      "model": "robonix_minecraft:block/fiducial_marker_27",
+      "y": 270
+    },
+    "facing=north,marker_id=28": {
+      "model": "robonix_minecraft:block/fiducial_marker_28"
+    },
+    "facing=east,marker_id=28": {
+      "model": "robonix_minecraft:block/fiducial_marker_28",
+      "y": 90
+    },
+    "facing=south,marker_id=28": {
+      "model": "robonix_minecraft:block/fiducial_marker_28",
+      "y": 180
+    },
+    "facing=west,marker_id=28": {
+      "model": "robonix_minecraft:block/fiducial_marker_28",
+      "y": 270
+    },
+    "facing=north,marker_id=29": {
+      "model": "robonix_minecraft:block/fiducial_marker_29"
+    },
+    "facing=east,marker_id=29": {
+      "model": "robonix_minecraft:block/fiducial_marker_29",
+      "y": 90
+    },
+    "facing=south,marker_id=29": {
+      "model": "robonix_minecraft:block/fiducial_marker_29",
+      "y": 180
+    },
+    "facing=west,marker_id=29": {
+      "model": "robonix_minecraft:block/fiducial_marker_29",
+      "y": 270
+    },
+    "facing=north,marker_id=30": {
+      "model": "robonix_minecraft:block/fiducial_marker_30"
+    },
+    "facing=east,marker_id=30": {
+      "model": "robonix_minecraft:block/fiducial_marker_30",
+      "y": 90
+    },
+    "facing=south,marker_id=30": {
+      "model": "robonix_minecraft:block/fiducial_marker_30",
+      "y": 180
+    },
+    "facing=west,marker_id=30": {
+      "model": "robonix_minecraft:block/fiducial_marker_30",
+      "y": 270
+    },
+    "facing=north,marker_id=31": {
+      "model": "robonix_minecraft:block/fiducial_marker_31"
+    },
+    "facing=east,marker_id=31": {
+      "model": "robonix_minecraft:block/fiducial_marker_31",
+      "y": 90
+    },
+    "facing=south,marker_id=31": {
+      "model": "robonix_minecraft:block/fiducial_marker_31",
+      "y": 180
+    },
+    "facing=west,marker_id=31": {
+      "model": "robonix_minecraft:block/fiducial_marker_31",
+      "y": 270
+    }
+  }
+}

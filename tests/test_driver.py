@@ -524,6 +524,12 @@ class MinecraftModClientTest(unittest.TestCase):
         self.assertEqual(payload["duration_ms"], 250)
         self.assertAlmostEqual(payload["yaw_degrees"], math.degrees(0.1))
         self.assertEqual(cmd_vel_payload(0.0, 0.0, 0.0, 0.25), {"cmd": "stop"})
+        self.assertAlmostEqual(driver.cmd_vel_level_pitch_delta_deg(math.radians(40.0)), -30.0)
+        self.assertAlmostEqual(driver.cmd_vel_level_pitch_delta_deg(math.radians(12.0)), -12.0)
+        self.assertAlmostEqual(driver.cmd_vel_level_pitch_delta_deg(math.radians(-10.0)), 10.0)
+        self.assertEqual(driver.cmd_vel_level_pitch_delta_deg(math.radians(0.2)), 0.0)
+        leveled = cmd_vel_payload(0.5, 0.0, 0.0, 0.25, pitch_degrees=-12.0)
+        self.assertAlmostEqual(leveled["pitch_degrees"], -12.0)
 
     def test_cmd_vel_rejects_nonplanar_or_excessive_motion(self) -> None:
         """Fail closed before unsupported Nav2 motion reaches the Mod."""
@@ -2647,6 +2653,226 @@ class MinecraftModClientTest(unittest.TestCase):
         server.join(timeout=2)
         self.assertFalse(movement.is_alive())
         self.assertFalse(server.is_alive())
+
+    def test_configured_rtk_defaults_and_validation(self) -> None:
+        enabled, topic, status_topic, frame_id, hz, max_range, noise = driver.configured_rtk({})
+        self.assertFalse(enabled)
+        self.assertEqual(topic, "/minecraft/gnss/rtk_fix")
+        self.assertEqual(status_topic, "/minecraft/gnss/rtk_status")
+        self.assertEqual(frame_id, "campus_rtk")
+        self.assertAlmostEqual(hz, 5.0)
+        self.assertAlmostEqual(max_range, 256.0)
+        self.assertTrue(noise)
+
+        cfg = driver.configured_rtk({
+            "rtk_enabled": True,
+            "rtk_stream_hz": 10.0,
+            "rtk_max_range_m": 512.0,
+            "rtk_noise_enabled": False,
+        })
+        self.assertTrue(cfg[0])
+        self.assertAlmostEqual(cfg[4], 10.0)
+        self.assertAlmostEqual(cfg[5], 512.0)
+        self.assertFalse(cfg[6])
+
+        with self.assertRaises(ValueError):
+            driver.configured_rtk({"rtk_enabled": "yes"})
+        with self.assertRaises(ValueError):
+            driver.configured_rtk({"rtk_stream_hz": 0.1})
+        with self.assertRaises(ValueError):
+            driver.configured_rtk({"rtk_max_range_m": 5.0})
+
+    def test_publish_rtk_fix_publishes_status_and_skips_pose_on_no_fix(self) -> None:
+        import types
+        from unittest import mock
+
+        status_msgs: list = []
+        fix_msgs: list = []
+
+        class _FakePub:
+            def __init__(self, target):
+                self.target = target
+
+            def publish(self, msg):
+                self.target.append(msg)
+
+        class _FakeString:
+            def __init__(self, data=""):
+                self.data = data
+
+        class _FakePoseWithCov:
+            def __init__(self):
+                self.header = types.SimpleNamespace(
+                    stamp=types.SimpleNamespace(sec=0, nanosec=0),
+                    frame_id="",
+                )
+                self.pose = types.SimpleNamespace(
+                    pose=types.SimpleNamespace(
+                        position=types.SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                        orientation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+                    ),
+                    covariance=[0.0] * 36,
+                )
+
+        fake_std = types.ModuleType("std_msgs")
+        fake_std_msg = types.ModuleType("std_msgs.msg")
+        fake_std_msg.String = _FakeString
+        fake_std.msg = fake_std_msg
+        fake_geom = types.ModuleType("geometry_msgs")
+        fake_geom_msg = types.ModuleType("geometry_msgs.msg")
+        fake_geom_msg.PoseWithCovarianceStamped = _FakePoseWithCov
+        fake_geom.msg = fake_geom_msg
+
+        old_fix = driver.rtk_fix_publisher
+        old_status = driver.rtk_status_publisher
+        try:
+            driver.rtk_fix_publisher = _FakePub(fix_msgs)
+            driver.rtk_status_publisher = _FakePub(status_msgs)
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "std_msgs": fake_std,
+                    "std_msgs.msg": fake_std_msg,
+                    "geometry_msgs": fake_geom,
+                    "geometry_msgs.msg": fake_geom_msg,
+                },
+            ):
+                driver.publish_rtk_fix({
+                    "rtkFix": {
+                        "valid": False,
+                        "fix_type": "NO_FIX",
+                        "fix_code": 0,
+                        "east": 0.0,
+                        "north": 0.0,
+                        "up": 0.0,
+                        "sigma_xy": 999.0,
+                        "sigma_z": 999.0,
+                        "sky_visibility": 0.1,
+                        "num_sats": 1,
+                        "base_id": "",
+                        "base_distance_m": -1.0,
+                        "station_count": 1,
+                        "yaw": 0.0,
+                        "timestamp": 12.5,
+                    }
+                })
+                self.assertEqual(len(status_msgs), 1)
+                self.assertEqual(len(fix_msgs), 0)
+                payload = json.loads(status_msgs[0].data)
+                self.assertFalse(payload["valid"])
+                self.assertEqual(payload["fix_type"], "NO_FIX")
+
+                driver.publish_rtk_fix({
+                    "rtkFix": {
+                        "valid": True,
+                        "fix_type": "RTK_FIXED",
+                        "fix_code": 4,
+                        "east": 80.5,
+                        "north": -22.25,
+                        "up": -60.0,
+                        "sigma_xy": 0.05,
+                        "sigma_z": 0.10,
+                        "sky_visibility": 1.0,
+                        "num_sats": 18,
+                        "base_id": "rtk_1",
+                        "base_distance_m": 15.0,
+                        "station_count": 1,
+                        "yaw": 0.5,
+                        "timestamp": 13.0,
+                    }
+                })
+                self.assertEqual(len(status_msgs), 2)
+                self.assertEqual(len(fix_msgs), 1)
+                self.assertAlmostEqual(fix_msgs[0].pose.pose.position.x, 80.5)
+                self.assertAlmostEqual(fix_msgs[0].pose.pose.position.y, -22.25)
+                self.assertAlmostEqual(fix_msgs[0].pose.covariance[0], 0.0025)
+        finally:
+            driver.rtk_fix_publisher = old_fix
+            driver.rtk_status_publisher = old_status
+
+    def test_at_point_capabilities_convert_odom_and_dispatch(self) -> None:
+        """Pure-sensor *_at_point capabilities convert minecraft_odom to integer block coords."""
+        self.assertEqual(driver._odom_point_to_block_pos(10.5, -20.5, -59.5), (10, -60, 20))
+        self.assertEqual(driver._odom_point_to_block_pos(-1.2, 3.2, 64.9), (-2, 64, -4))
+
+        aim_req = driver.minecraft_mcp.AimAtOdomPoint_Request(
+            odom_x=10.5, odom_y=-20.5, odom_z=-59.5, expected_block="minecraft:chest",
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            return_value={
+                "aimed": True,
+                "actual_block": "minecraft:chest",
+                "hit_face": "north",
+                "final_yaw_deg": 45.0,
+                "final_pitch_deg": 15.0,
+            },
+        ) as req:
+            resp = driver.aim_at_odom_point_mcp(aim_req)
+        self.assertTrue(resp.aimed)
+        self.assertEqual(resp.actual_block, "minecraft:chest")
+        self.assertEqual(resp.hit_face, "north")
+        self.assertEqual(req.call_args.args[0], {
+            "cmd": "aim_at_block", "x": 10, "y": -60, "z": 20, "expected_block": "minecraft:chest",
+        })
+
+        insp_req = driver.minecraft_mcp.InspectContainerAtPoint_Request(
+            odom_x=10.5, odom_y=-20.5, odom_z=-59.5,
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            return_value={
+                "container_type": "minecraft:chest",
+                "slot_count": 1,
+                "slots": [{"slot": 0, "item": "minecraft:apple", "count": 4}],
+            },
+        ) as req:
+            resp = driver.inspect_container_at_point_mcp(insp_req)
+        self.assertEqual(resp.container_type, "minecraft:chest")
+        self.assertEqual(resp.slots[0].item, "minecraft:apple")
+        self.assertEqual(req.call_args.args[0], {"cmd": "inspect_container", "x": 10, "y": -60, "z": 20})
+
+        wd_req = driver.minecraft_mcp.WithdrawItemAtPoint_Request(
+            odom_x=10.5, odom_y=-20.5, odom_z=-59.5, item="minecraft:apple", count=2,
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            return_value={
+                "transferred_count": 2,
+                "player_count_before": 0,
+                "player_count_after": 2,
+                "container_count_before": 4,
+                "container_count_after": 2,
+            },
+        ) as req:
+            resp = driver.withdraw_item_at_point_mcp(wd_req)
+        self.assertEqual(resp.transferred_count, 2)
+        self.assertEqual(req.call_args.args[0], {
+            "cmd": "withdraw_item", "x": 10, "y": -60, "z": 20, "item": "minecraft:apple", "count": 2,
+        })
+
+        dep_req = driver.minecraft_mcp.DepositItemAtPoint_Request(
+            odom_x=10.5, odom_y=-20.5, odom_z=-59.5, item="minecraft:apple", count=1,
+        )
+        with patch.object(
+            driver.client,
+            "request",
+            return_value={
+                "transferred_count": 1,
+                "player_count_before": 2,
+                "player_count_after": 1,
+                "container_count_before": 2,
+                "container_count_after": 3,
+            },
+        ) as req:
+            resp = driver.deposit_item_at_point_mcp(dep_req)
+        self.assertEqual(resp.container_count_after, 3)
+        self.assertEqual(req.call_args.args[0], {
+            "cmd": "deposit_item", "x": 10, "y": -60, "z": 20, "item": "minecraft:apple", "count": 1,
+        })
 
 
 if __name__ == "__main__":

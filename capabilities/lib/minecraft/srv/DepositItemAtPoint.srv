@@ -1,0 +1,11 @@
+float64 odom_x
+float64 odom_y
+float64 odom_z
+string item
+uint32 count
+---
+uint32 transferred_count
+uint32 player_count_before
+uint32 player_count_after
+uint32 container_count_before
+uint32 container_count_after

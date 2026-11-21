@@ -1,0 +1,9 @@
+[contract]
+id      = "robonix/primitive/minecraft/withdraw_item_at_point"
+version = "1"
+kind    = "primitive"
+idl     = "minecraft/srv/WithdrawItemAtPoint.srv"
+description = "Withdraw an exact count of a registered item from a reachable chest at a sensor-estimated 3D point in minecraft_odom (after aiming)."
+
+[mode]
+type = "rpc"

@@ -1,0 +1,11 @@
+# Simulated onboard RTK/GNSS fix in the campus ENU frame.
+# Published as geometry_msgs/PoseWithCovarianceStamped with realistic
+# covariance reflecting RTK_FIXED / RTK_FLOAT / SINGLE_GNSS quality.
+[contract]
+id      = "robonix/primitive/gnss/rtk_fix"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/geometry_msgs/msg/PoseWithCovarianceStamped.msg"
+
+[mode]
+type = "topic_out"
