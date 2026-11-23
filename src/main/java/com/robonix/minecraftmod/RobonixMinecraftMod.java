@@ -30,6 +30,8 @@ public final class RobonixMinecraftMod {
         var serverControl = new ServerControllerLifecycle();
         MinecraftForge.EVENT_BUS.addListener(serverControl::started);
         MinecraftForge.EVENT_BUS.addListener(serverControl::stopping);
+        MinecraftForge.EVENT_BUS.addListener(ElevatorEngine::onServerTick);
+        MinecraftForge.EVENT_BUS.addListener(ElevatorCommands::onRegisterCommands);
         MinecraftForge.EVENT_BUS.addListener(RobonixMinecraftMod::onPlayerLoggedIn);
         MinecraftForge.EVENT_BUS.addListener(RobonixMinecraftMod::onPlayerChangedDimension);
         DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> ClientBootstrap::start);

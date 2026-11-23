@@ -8,17 +8,23 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.util.Mth;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.client.event.MovementInputUpdateEvent;
 import net.minecraftforge.event.TickEvent;
 
 /** Executes bounded movement commands through normal client movement input. */
 public final class MinecraftControl {
     private static final double WALK_SPEED_BLOCKS_PER_SECOND = 4.317;
+    private static final long AUTO_STEP_JUMP_COOLDOWN_NANOS = 450_000_000L;
     private ActiveMove activeMove;
     private ActiveVelocity activeVelocity;
     private boolean respawnRequested;
+    private long lastAutoStepJumpNanos;
     private BooleanSupplier actionActive = () -> false;
 
     /** Installs the colocated action-state guard used by new motion commands. */
@@ -147,11 +153,56 @@ public final class MinecraftControl {
     /** Applies proportional planar movement input while a velocity command is active. */
     public void onMovementInput(MovementInputUpdateEvent event) {
         ActiveVelocity velocity = activeVelocity;
-        if (velocity == null || event.getEntity() != Minecraft.getInstance().player) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (velocity == null || event.getEntity() != minecraft.player) {
             return;
         }
         event.getInput().forwardImpulse = (float) (velocity.linearX() / WALK_SPEED_BLOCKS_PER_SECOND);
         event.getInput().leftImpulse = (float) (velocity.linearY() / WALK_SPEED_BLOCKS_PER_SECOND);
+
+        // Controlled 1-block auto-step jump: ONLY triggers when moving forward, colliding
+        // horizontally on ground, and pure collision rays confirm a climbable <= 1.0 m curb/step
+        // with full >= 2.0 m headroom above (never jumps against walls, closed doors, or fences).
+        LocalPlayer player = minecraft.player;
+        ClientLevel level = minecraft.level;
+        if (player != null && level != null
+                && velocity.linearX() > 0.15
+                && player.onGround()
+                && player.horizontalCollision) {
+            long now = System.nanoTime();
+            if (now - lastAutoStepJumpNanos >= AUTO_STEP_JUMP_COOLDOWN_NANOS
+                    && isClimbableOneBlockStepAhead(level, player)) {
+                event.getInput().jumping = true;
+                lastAutoStepJumpNanos = now;
+            }
+        }
+    }
+
+    /** Pure collision-ray check for a <= 1-block climbable step with >= 2 blocks headroom ahead. */
+    private static boolean isClimbableOneBlockStepAhead(ClientLevel level, LocalPlayer player) {
+        double yawRad = Math.toRadians(player.getYRot());
+        double fx = -Math.sin(yawRad);
+        double fz = Math.cos(yawRad);
+        double px = player.getX();
+        double py = player.getY();
+        double pz = player.getZ();
+
+        Vec3 lowStart = new Vec3(px, py + 0.55, pz);
+        Vec3 lowEnd = lowStart.add(fx * 0.90, 0.0, fz * 0.90);
+        var lowHit = level.clip(new ClipContext(lowStart, lowEnd, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+        if (lowHit.getType() != HitResult.Type.BLOCK) {
+            return false;
+        }
+        // Check headroom at +1.15 m and +2.05 m above current feet (must both be clear across 0.95 m)
+        for (double h : new double[] {1.15, 2.05}) {
+            Vec3 s = new Vec3(px, py + h, pz);
+            Vec3 e = s.add(fx * 0.95, 0.0, fz * 0.95);
+            var hit = level.clip(new ClipContext(s, e, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+            if (hit.getType() == HitResult.Type.BLOCK) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Ends commands outside a world or requests one respawn per player death. */

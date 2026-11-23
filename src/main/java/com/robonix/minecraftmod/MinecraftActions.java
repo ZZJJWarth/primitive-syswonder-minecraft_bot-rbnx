@@ -156,6 +156,100 @@ public final class MinecraftActions implements AutoCloseable {
         return result;
     }
 
+    /**
+     * Pure-physical crosshair right-click interaction toward a 3D point (e.g. door/button/lever).
+     *
+     * Smoothly rotates the player's view toward (targetX, targetY, targetZ) and triggers a normal
+     * client right-click (`gameMode.useItemOn`) along the crosshair ray without reading or returning
+     * any block IDs, block states, or hidden world metadata.
+     */
+    public CompletableFuture<JsonObject> interactPoint(
+            double targetX,
+            double targetY,
+            double targetZ,
+            double maxReach
+    ) {
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        Minecraft.getInstance().execute(() -> {
+            try {
+                requireNoActiveAction();
+                if (!Double.isFinite(targetX) || !Double.isFinite(targetY) || !Double.isFinite(targetZ)) {
+                    throw new IllegalArgumentException("target coordinates must be finite");
+                }
+                double reach = Double.isFinite(maxReach) ? Math.max(1.0, Math.min(5.0, maxReach)) : 4.5;
+                Minecraft minecraft = Minecraft.getInstance();
+                LocalPlayer player = requirePlayer(minecraft);
+                if (minecraft.level == null || minecraft.gameMode == null) {
+                    throw new IllegalStateException("Minecraft world or game mode is unavailable");
+                }
+                if (minecraft.screen != null) {
+                    player.closeContainer();
+                }
+                control.stopForAction();
+                long now = System.nanoTime();
+                activeAction = new ActiveInteractPoint(
+                        player,
+                        new Vec3(targetX, targetY, targetZ),
+                        reach,
+                        now,
+                        now + AIM_TIMEOUT_NANOS,
+                        result);
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
+    }
+
+    /** Pure-physical body-relative right-click (forward, left, up from feet); immune to odom origin/drift. */
+    public CompletableFuture<JsonObject> interactPointRelative(
+            double forward,
+            double left,
+            double up,
+            double maxReach
+    ) {
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        Minecraft.getInstance().execute(() -> {
+            try {
+                requireNoActiveAction();
+                if (!Double.isFinite(forward) || !Double.isFinite(left) || !Double.isFinite(up)) {
+                    throw new IllegalArgumentException("relative coordinates must be finite");
+                }
+                double reach = Double.isFinite(maxReach) ? Math.max(1.0, Math.min(5.0, maxReach)) : 4.5;
+                Minecraft minecraft = Minecraft.getInstance();
+                LocalPlayer player = requirePlayer(minecraft);
+                if (minecraft.level == null || minecraft.gameMode == null) {
+                    throw new IllegalStateException("Minecraft world or game mode is unavailable");
+                }
+                if (minecraft.screen != null) {
+                    player.closeContainer();
+                }
+                control.stopForAction();
+                double yawRad = Math.toRadians(player.getYRot());
+                double fwdX = -Math.sin(yawRad);
+                double fwdZ = Math.cos(yawRad);
+                // Left in Minecraft XZ plane (east=+X, south=+Z): rotating forward CCW by +90 deg in ENU
+                double leftX = fwdZ;
+                double leftZ = -fwdX;
+                Vec3 target = new Vec3(
+                        player.getX() + fwdX * forward + leftX * left,
+                        player.getY() + up,
+                        player.getZ() + fwdZ * forward + leftZ * left);
+                long now = System.nanoTime();
+                activeAction = new ActiveInteractPoint(
+                        player,
+                        target,
+                        reach,
+                        now,
+                        now + AIM_TIMEOUT_NANOS,
+                        result);
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
+        });
+        return result;
+    }
+
     /** Gradually turns the player until the live crosshair stably hits one reachable block. */
     public CompletableFuture<JsonObject> aimAtBlock(
             int x,
@@ -911,6 +1005,8 @@ public final class MinecraftActions implements AutoCloseable {
                 tickFillWaterBottles(minecraft, player, fill);
             } else if (action instanceof ActiveAim aiming) {
                 tickAim(minecraft, player, aiming);
+            } else if (action instanceof ActiveInteractPoint interacting) {
+                tickInteractPoint(minecraft, player, interacting);
             } else if (action instanceof ActiveSearchArea search) {
                 tickSearchArea(minecraft, player, search);
             }
@@ -970,6 +1066,75 @@ public final class MinecraftActions implements AutoCloseable {
         }
         action.resetStableHitTicks();
         turnTowardBlock(player, action, System.nanoTime());
+    }
+
+    /** Smoothly aims at a 3D point and triggers one physical right-click along the look ray. */
+    private void tickInteractPoint(
+            Minecraft minecraft,
+            LocalPlayer player,
+            ActiveInteractPoint action
+    ) {
+        if (minecraft.level == null || minecraft.gameMode == null) {
+            throw new IllegalStateException("Minecraft world or game mode is unavailable");
+        }
+        Vec3 eye = player.getEyePosition();
+        Vec3 target = action.target();
+        double dx = target.x - eye.x;
+        double dy = target.y - eye.y;
+        double dz = target.z - eye.z;
+        double horizontal = Math.hypot(dx, dz);
+        float targetYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float targetPitch = (float) -Math.toDegrees(Math.atan2(dy, Math.max(1e-6, horizontal)));
+
+        long now = System.nanoTime();
+        double elapsedSeconds = Math.min(0.1, Math.max(0.001,
+                (now - action.lastStepNanos()) / 1_000_000_000.0));
+        float yawError = Mth.wrapDegrees(targetYaw - player.getYRot());
+        float pitchError = targetPitch - player.getXRot();
+
+        if (Math.abs(yawError) > 3.0F || Math.abs(pitchError) > 3.0F) {
+            float yawStep = boundedStep(yawError, MAX_AIM_YAW_DEGREES_PER_SECOND * elapsedSeconds);
+            float pitchStep = boundedStep(pitchError, MAX_AIM_PITCH_DEGREES_PER_SECOND * elapsedSeconds);
+            player.setYRot(player.getYRot() + yawStep);
+            player.setYHeadRot(player.getYRot());
+            player.setXRot(Mth.clamp(player.getXRot() + pitchStep, -90.0F, 90.0F));
+            action.setLastStepNanos(now);
+            return;
+        }
+        action.setLastStepNanos(now);
+        if (action.incrementAlignedTicks() < 2) {
+            return;
+        }
+
+        // Cast a standard player-reach crosshair ray along the current look direction.
+        Vec3 look = player.getLookAngle();
+        Vec3 rayEnd = eye.add(look.scale(action.maxReach()));
+        BlockHitResult hit = minecraft.level.clip(new ClipContext(
+                eye,
+                rayEnd,
+                ClipContext.Block.OUTLINE,
+                ClipContext.Fluid.NONE,
+                player));
+
+        boolean consumed = false;
+        double hitDist = -1.0;
+        if (hit.getType() == HitResult.Type.BLOCK) {
+            hitDist = eye.distanceTo(hit.getLocation());
+            if (hitDist <= action.maxReach()) {
+                consumed = minecraft.gameMode
+                        .useItemOn(player, InteractionHand.MAIN_HAND, hit)
+                        .consumesAction();
+                player.swing(InteractionHand.MAIN_HAND);
+            }
+        }
+
+        JsonObject response = new JsonObject();
+        response.addProperty("interacted", hit.getType() == HitResult.Type.BLOCK && hitDist <= action.maxReach());
+        response.addProperty("consumed", consumed);
+        response.addProperty("hit_distance_m", hitDist >= 0.0 ? Math.round(hitDist * 1000.0) / 1000.0 : -1.0);
+        response.addProperty("final_yaw_deg", player.getYRot());
+        response.addProperty("final_pitch_deg", player.getXRot());
+        finishActive(response);
     }
 
     /** Turns toward the target centre without exceeding the configured per-second view rates. */
@@ -2304,7 +2469,7 @@ public final class MinecraftActions implements AutoCloseable {
         JsonObject run();
     }
 
-    private sealed interface ActiveAction permits ActiveAim, ActiveAttack, ActiveBreak, ActiveDeposit,
+    private sealed interface ActiveAction permits ActiveAim, ActiveInteractPoint, ActiveAttack, ActiveBreak, ActiveDeposit,
             ActiveWithdraw, ActiveInspectContainer, ActiveFillWaterBottles, ActiveSelectInventoryItem,
             ActiveSearchArea {
         LocalPlayer player();
@@ -2907,6 +3072,42 @@ public final class MinecraftActions implements AutoCloseable {
         int levelBefore() { return levelBefore; }
         int filledCount() { return filledCount; }
         FillPhase phase() { return phase; }
+        @Override public long deadlineNanos() { return deadlineNanos; }
+        @Override public CompletableFuture<JsonObject> result() { return result; }
+    }
+
+    /** Tracks bounded view alignment for one pure-physical 3D crosshair right-click interaction. */
+    private static final class ActiveInteractPoint implements ActiveAction {
+        private final LocalPlayer player;
+        private final Vec3 target;
+        private final double maxReach;
+        private long lastStepNanos;
+        private final long deadlineNanos;
+        private final CompletableFuture<JsonObject> result;
+        private int alignedTicks;
+
+        ActiveInteractPoint(
+                LocalPlayer player,
+                Vec3 target,
+                double maxReach,
+                long lastStepNanos,
+                long deadlineNanos,
+                CompletableFuture<JsonObject> result
+        ) {
+            this.player = player;
+            this.target = target;
+            this.maxReach = maxReach;
+            this.lastStepNanos = lastStepNanos;
+            this.deadlineNanos = deadlineNanos;
+            this.result = result;
+        }
+
+        @Override public LocalPlayer player() { return player; }
+        Vec3 target() { return target; }
+        double maxReach() { return maxReach; }
+        long lastStepNanos() { return lastStepNanos; }
+        void setLastStepNanos(long value) { lastStepNanos = value; }
+        int incrementAlignedTicks() { return ++alignedTicks; }
         @Override public long deadlineNanos() { return deadlineNanos; }
         @Override public CompletableFuture<JsonObject> result() { return result; }
     }

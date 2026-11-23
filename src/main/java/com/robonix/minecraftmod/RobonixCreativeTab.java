@@ -21,6 +21,7 @@ public final class RobonixCreativeTab {
                     .icon(() -> RtkRegistry.RTK_MAPPER.get().getDefaultInstance())
                     .withTabsBefore(CreativeModeTabs.SPAWN_EGGS)
                     .displayItems((parameters, output) -> {
+                        output.accept(ElevatorControllerRegistry.ELEVATOR_STATION_ITEM.get());
                         output.accept(ElevatorControllerRegistry.CONTROLLER_ITEM.get());
                         output.accept(RtkRegistry.RTK_BASE_STATION_ITEM.get());
                         output.accept(RtkRegistry.RTK_MAPPER.get());

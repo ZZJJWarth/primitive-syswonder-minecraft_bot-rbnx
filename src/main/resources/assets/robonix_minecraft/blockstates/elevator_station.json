@@ -1,0 +1,19 @@
+{
+  "variants": {
+    "facing=north": {
+      "model": "robonix_minecraft:block/elevator_station"
+    },
+    "facing=east": {
+      "model": "robonix_minecraft:block/elevator_station",
+      "y": 90
+    },
+    "facing=south": {
+      "model": "robonix_minecraft:block/elevator_station",
+      "y": 180
+    },
+    "facing=west": {
+      "model": "robonix_minecraft:block/elevator_station",
+      "y": 270
+    }
+  }
+}

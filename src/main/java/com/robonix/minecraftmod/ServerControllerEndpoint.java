@@ -104,6 +104,13 @@ public final class ServerControllerEndpoint implements AutoCloseable {
         if (cmd.equals("rtk_mapper_poll")) {
             return dispatchRtkMapperPoll(json);
         }
+        if (cmd.equals("elevator_list")
+                || cmd.equals("elevator_status")
+                || cmd.equals("elevator_call")
+                || cmd.equals("elevator_door")
+                || cmd.equals("elevator_move")) {
+            return dispatchNativeElevator(cmd, json);
+        }
         if (!cmd.equals("elevator_controller_get") && !cmd.equals("elevator_controller_set")) {
             throw new IllegalArgumentException("unsupported server command: " + cmd);
         }
@@ -130,6 +137,114 @@ public final class ServerControllerEndpoint implements AutoCloseable {
                 var player = playerName == null ? null : server.getPlayerList().getPlayerByName(playerName);
                 result.complete(ServerControllerAccess.execute(server, request, player, command));
             } catch (Exception exception) { result.completeExceptionally(exception); }
+        });
+        return result;
+    }
+
+    private CompletableFuture<JsonObject> dispatchNativeElevator(String cmd, JsonObject json) {
+        String dimension = json.has("dimension") ? string(json, "dimension") : "minecraft:overworld";
+        CompletableFuture<JsonObject> result = new CompletableFuture<>();
+        result.orTimeout(9, TimeUnit.SECONDS);
+        server.execute(() -> {
+            if (closed || result.isDone()) {
+                result.completeExceptionally(new IllegalStateException("server endpoint stopped"));
+                return;
+            }
+            try {
+                ResourceKey<Level> key = ResourceKey.create(Registries.DIMENSION, new ResourceLocation(dimension));
+                ServerLevel level = server.getLevel(key);
+                if (level == null) {
+                    throw new IllegalArgumentException("unknown dimension: " + dimension);
+                }
+                ElevatorSavedData data = ElevatorSavedData.get(level);
+                data.pruneMissing(level);
+
+                if (cmd.equals("elevator_list")) {
+                    // Pure IoT elevator registry: IDs, states, floor labels only — ZERO world coordinates!
+                    JsonObject out = new JsonObject();
+                    out.addProperty("dimension", dimension);
+                    JsonArray arr = new JsonArray();
+                    for (var rec : data.listElevators()) {
+                        arr.add(rec.toRuntimeJson(level));
+                    }
+                    out.add("elevators", arr);
+                    result.complete(out);
+                    return;
+                }
+
+                String elevId = string(json, "elevator_id");
+                ElevatorSavedData.ElevatorRecord rec = data.getById(elevId);
+                if (rec == null) {
+                    throw new IllegalArgumentException("unknown elevator_id: " + elevId);
+                }
+
+                switch (cmd) {
+                    case "elevator_status" -> {
+                        result.complete(rec.toRuntimeJson(level));
+                    }
+                    case "elevator_call" -> {
+                        String floor = string(json, "floor");
+                        boolean openDoor = !json.has("open_door") || json.get("open_door").getAsBoolean();
+                        var stop = rec.resolveFloor(floor);
+                        if (stop == null) {
+                            throw new IllegalArgumentException("unknown floor " + floor + " on " + elevId);
+                        }
+                        boolean accepted = ElevatorEngine.dispatchToFloor(level, data, rec, stop, openDoor);
+                        JsonObject out = rec.toRuntimeJson(level);
+                        out.addProperty("action_accepted", accepted);
+                        if (!accepted) {
+                            out.addProperty("door_blocked", true);
+                        }
+                        result.complete(out);
+                    }
+                    case "elevator_move" -> {
+                        String floor = string(json, "floor");
+                        var stop = rec.resolveFloor(floor);
+                        if (stop == null) {
+                            throw new IllegalArgumentException("unknown floor " + floor + " on " + elevId);
+                        }
+                        boolean accepted = ElevatorEngine.dispatchToFloor(level, data, rec, stop, false);
+                        JsonObject out = rec.toRuntimeJson(level);
+                        out.addProperty("action_accepted", accepted);
+                        if (!accepted) {
+                            out.addProperty("door_blocked", true);
+                        }
+                        result.complete(out);
+                    }
+                    case "elevator_door" -> {
+                        if (!json.has("open") || !json.get("open").isJsonPrimitive()
+                                || !json.getAsJsonPrimitive("open").isBoolean()) {
+                            throw new IllegalArgumentException("open must be a JSON boolean");
+                        }
+                        boolean open = json.get("open").getAsBoolean();
+                        boolean accepted;
+                        if (json.has("floor") && !json.get("floor").isJsonNull()) {
+                            String floor = string(json, "floor");
+                            var stop = rec.resolveFloor(floor);
+                            if (stop == null) {
+                                throw new IllegalArgumentException("unknown floor " + floor + " on " + elevId);
+                            }
+                            accepted = ElevatorEngine.setDoorAtFloor(level, data, rec, stop, open);
+                        } else if (!open) {
+                            accepted = ElevatorEngine.closeAllDoors(level, rec);
+                            if (accepted) {
+                                data.markDirty();
+                            }
+                        } else {
+                            accepted = ElevatorEngine.setDoorAtCurrentFloor(level, data, rec, true);
+                        }
+                        JsonObject out = rec.toRuntimeJson(level);
+                        out.addProperty("action_accepted", accepted);
+                        if (!accepted) {
+                            out.addProperty("door_blocked", true);
+                        }
+                        result.complete(out);
+                    }
+                    default -> throw new IllegalArgumentException("unsupported elevator command: " + cmd);
+                }
+            } catch (Exception exception) {
+                result.completeExceptionally(exception);
+            }
         });
         return result;
     }

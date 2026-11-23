@@ -20,6 +20,11 @@ public final class ElevatorControllerRegistry {
                             .isRedstoneConductor((state, level, pos) -> false)));
     public static final RegistryObject<Item> CONTROLLER_ITEM = ITEMS.register(
             "elevator_controller", () -> new BlockItem(CONTROLLER.get(), new Item.Properties()));
+    public static final RegistryObject<ElevatorStationBlock> ELEVATOR_STATION = BLOCKS.register(
+            "elevator_station", () -> new ElevatorStationBlock(
+                    BlockBehaviour.Properties.of().strength(3.5F).lightLevel(s -> 5)));
+    public static final RegistryObject<Item> ELEVATOR_STATION_ITEM = ITEMS.register(
+            "elevator_station", () -> new BlockItem(ELEVATOR_STATION.get(), new Item.Properties()));
 
     private ElevatorControllerRegistry() {}
 }

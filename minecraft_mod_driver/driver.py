@@ -8,6 +8,7 @@ import grpc
 import json
 import math
 import os
+import random
 import re
 import socket
 import struct
@@ -145,6 +146,13 @@ rtk_stream_hz = 5.0
 rtk_max_range_m = 256.0
 rtk_noise_enabled = True
 odom_frame_id = "minecraft_odom"
+odom_relative_origin = False
+odom_linear_drift_rate = 0.0
+odom_yaw_drift_rad_per_m = 0.0
+odom_drift_seed = 42
+_odom_rng: random.Random | None = None
+_odom_prev_world: tuple[float, float, float, float] | None = None
+_odom_integrated: tuple[float, float, float, float] | None = None
 eye_height = 1.62
 rgb_topic = "/minecraft/camera/rgb"
 depth_topic = "/minecraft/camera/depth"
@@ -893,8 +901,50 @@ def publish_clock_diagnostic(sample: ClockSample, payload: dict[str, Any]) -> No
     ))
 
 
+def _integrate_relative_odom(
+    world_x: float,
+    world_y: float,
+    world_z: float,
+    world_yaw: float,
+) -> tuple[float, float, float, float]:
+    """Integrate spawn-relative local odometry with optional wheel/gyro drift."""
+    global _odom_rng, _odom_prev_world, _odom_integrated
+    if _odom_prev_world is None or _odom_integrated is None:
+        _odom_rng = random.Random(int(odom_drift_seed))
+        _odom_prev_world = (world_x, world_y, world_z, world_yaw)
+        _odom_integrated = (0.0, 0.0, 0.0, 0.0)
+        return _odom_integrated
+    px, py, pz, pyaw = _odom_prev_world
+    ox, oy, oz, oyaw = _odom_integrated
+    dx_w = world_x - px
+    dy_w = world_y - py
+    dz_w = world_z - pz
+    dyaw = math.atan2(math.sin(world_yaw - pyaw), math.cos(world_yaw - pyaw))
+    # Project world increment into previous body frame (forward, left)
+    c_prev, s_prev = math.cos(pyaw), math.sin(pyaw)
+    d_fwd = c_prev * dx_w + s_prev * dy_w
+    d_left = -s_prev * dx_w + c_prev * dy_w
+    step_dist = math.hypot(d_fwd, d_left)
+    if step_dist > 1e-5 and _odom_rng is not None:
+        if odom_linear_drift_rate > 0.0:
+            scale = 1.0 + _odom_rng.gauss(0.0, odom_linear_drift_rate)
+            d_fwd *= scale
+            d_left *= scale
+        if odom_yaw_drift_rad_per_m > 0.0:
+            dyaw += step_dist * _odom_rng.gauss(0.0, odom_yaw_drift_rad_per_m)
+    mid_yaw = oyaw + 0.5 * dyaw
+    cm, sm = math.cos(mid_yaw), math.sin(mid_yaw)
+    nx = ox + cm * d_fwd - sm * d_left
+    ny = oy + sm * d_fwd + cm * d_left
+    nz = oz + dz_w
+    nyaw = math.atan2(math.sin(oyaw + dyaw), math.cos(oyaw + dyaw))
+    _odom_prev_world = (world_x, world_y, world_z, world_yaw)
+    _odom_integrated = (nx, ny, nz, nyaw)
+    return _odom_integrated
+
+
 def publish_odom(observation: dict[str, Any], timestamp: float | None = None) -> None:
-    """Publish exact player view odometry and its matching dynamic transform."""
+    """Publish chassis odometry (world or spawn-relative drifted) and matching TF + truth."""
     global previous_odom_sample, latest_observed_pitch_rad
     if odom_publisher is None:
         raise RuntimeError("chassis odom publisher is not initialized")
@@ -904,8 +954,12 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
     from nav_msgs.msg import Odometry  # type: ignore
 
     now = timestamp if timestamp is not None else time.time()
-    x, y, z, yaw, pitch = observation_pose(observation)
+    world_x, world_y, world_z, world_yaw, pitch = observation_pose(observation)
     latest_observed_pitch_rad = pitch
+    if odom_relative_origin:
+        x, y, z, yaw = _integrate_relative_odom(world_x, world_y, world_z, world_yaw)
+    else:
+        x, y, z, yaw = world_x, world_y, world_z, world_yaw
     forward = left = angular = 0.0
     if previous_odom_sample is not None:
         previous_time, previous_x, previous_y, previous_yaw = previous_odom_sample
@@ -966,8 +1020,10 @@ def publish_odom(observation: dict[str, Any], timestamp: float | None = None) ->
         truth.header.stamp.sec = message.header.stamp.sec
         truth.header.stamp.nanosec = message.header.stamp.nanosec
         truth.header.frame_id = odom_frame_id
-        truth.pose.position = message.pose.pose.position
-        view_quaternion = quaternion_from_yaw_pitch(yaw, pitch)
+        truth.pose.position.x = world_x
+        truth.pose.position.y = world_y
+        truth.pose.position.z = world_z
+        view_quaternion = quaternion_from_yaw_pitch(world_yaw, pitch)
         truth.pose.orientation.x = view_quaternion[0]
         truth.pose.orientation.y = view_quaternion[1]
         truth.pose.orientation.z = view_quaternion[2]
@@ -3210,9 +3266,18 @@ def initialize_camera(config: dict[str, Any]):
         lidar_high_topic = str(config.get("lidar_high_topic") or os.environ.get(
             "RBNX_MINECRAFT_LIDAR_HIGH_TOPIC", lidar_high_topic,
         ))
+        global odom_relative_origin, odom_linear_drift_rate, odom_yaw_drift_rad_per_m, odom_drift_seed
+        global _odom_prev_world, _odom_integrated, _odom_rng
         odom_frame_id = str(config.get("odom_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_ODOM_FRAME_ID", odom_frame_id,
         ))
+        odom_relative_origin = bool(config.get("odom_relative_origin", False))
+        odom_linear_drift_rate = max(0.0, float(config.get("odom_linear_drift_rate", 0.0)))
+        odom_yaw_drift_rad_per_m = max(0.0, float(config.get("odom_yaw_drift_rad_per_m", 0.0)))
+        odom_drift_seed = int(config.get("odom_drift_seed", 42))
+        _odom_prev_world = None
+        _odom_integrated = None
+        _odom_rng = None
         camera_time_descriptor, lidar_time_descriptor = (
             configured_sensor_time_descriptors(clock_emulator)
         )
@@ -3434,9 +3499,18 @@ def initialize_chassis(config: dict[str, Any]):
         odom_topic = str(config.get("odom_topic") or os.environ.get(
             "RBNX_MINECRAFT_ODOM_TOPIC", odom_topic,
         ))
+        global odom_relative_origin, odom_linear_drift_rate, odom_yaw_drift_rad_per_m, odom_drift_seed
+        global _odom_prev_world, _odom_integrated, _odom_rng
         odom_frame_id = str(config.get("odom_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_ODOM_FRAME_ID", odom_frame_id,
         ))
+        odom_relative_origin = bool(config.get("odom_relative_origin", False))
+        odom_linear_drift_rate = max(0.0, float(config.get("odom_linear_drift_rate", 0.0)))
+        odom_yaw_drift_rad_per_m = max(0.0, float(config.get("odom_yaw_drift_rad_per_m", 0.0)))
+        odom_drift_seed = int(config.get("odom_drift_seed", 42))
+        _odom_prev_world = None
+        _odom_integrated = None
+        _odom_rng = None
         base_frame_id = str(config.get("base_frame_id") or os.environ.get(
             "RBNX_MINECRAFT_BASE_FRAME_ID", base_frame_id,
         ))

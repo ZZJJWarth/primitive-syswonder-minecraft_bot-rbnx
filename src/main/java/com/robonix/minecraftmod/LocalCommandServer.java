@@ -193,6 +193,17 @@ public final class LocalCommandServer implements AutoCloseable {
                     requiredInt(request, "y"),
                     requiredInt(request, "z"),
                     requiredString(request, "expected_block"));
+            case "interact_point" -> (request.has("relative") && request.get("relative").getAsBoolean())
+                    ? actions.interactPointRelative(
+                            request.get("forward").getAsDouble(),
+                            request.get("left").getAsDouble(),
+                            request.get("up").getAsDouble(),
+                            request.has("max_reach") ? request.get("max_reach").getAsDouble() : 4.5)
+                    : actions.interactPoint(
+                            request.get("x").getAsDouble(),
+                            request.get("y").getAsDouble(),
+                            request.get("z").getAsDouble(),
+                            request.has("max_reach") ? request.get("max_reach").getAsDouble() : 4.5);
             case "break_block" -> actions.breakBlock(
                     requiredString(request, "expected_block"),
                     requiredBoolean(request, "collect"));

@@ -1,0 +1,12 @@
+{
+  "parent": "minecraft:block/cube",
+  "textures": {
+    "up": "robonix_minecraft:block/elevator_station_top",
+    "down": "robonix_minecraft:block/elevator_station_side",
+    "north": "robonix_minecraft:block/elevator_station_side",
+    "south": "robonix_minecraft:block/elevator_station_side",
+    "east": "robonix_minecraft:block/elevator_station_side",
+    "west": "robonix_minecraft:block/elevator_station_side",
+    "particle": "robonix_minecraft:block/elevator_station_top"
+  }
+}
